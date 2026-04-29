@@ -4,7 +4,7 @@
 
 1. ``fx_robot.Marvin_Robot`` 负责连接、清错、订阅、切模式、下发关节命令；
 2. ``fx_kine.Marvin_Kine`` 负责 FK/IK，PICO 笛卡尔目标先转 mm 再求 IK；
-3. 轨迹层复用 ``core.pico_streamer`` 的滤波、限位和位姿打印工具。
+3. PICO 遥操层复用 ``core.arm_teleop``，先只做 arm-only 控制，和 Revo2 手解耦。
 
 用法（在 ``python_server`` 目录）::
 
@@ -30,7 +30,7 @@
   - ``left``  → 左手柄 pose / trigger / grip，**X 键** 或 **左菜单键** 切换离合；
   - ``right`` → 右手柄 pose / trigger / grip，**A 键** 或 **右菜单键** 切换离合；
 - idle：只读 PICO 和臂状态，不下发；
-- active：末端在当前位姿附近按选定手柄的相对增量跟随；
+- active：默认只跟随手柄平移增量，末端姿态保持离合激活瞬间不变；
 - Ctrl+C：下使能 A 臂并释放 SDK 连接。
 
 安全建议：
@@ -54,7 +54,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np  # type: ignore[import-not-found]
-from scipy.spatial.transform import Rotation as R  # type: ignore[import-not-found]
 
 # 兼容两种启动方式：
 #   1) ./run.sh -m tools.test_xr_to_arm
@@ -63,13 +62,13 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core.pico_streamer import (  # noqa: E402
-    PoseEmaFilter,
-    PicoStreamer,
-    T_to_pos_rpy,
-    WORKSPACE_LIMITS,
-    clamp_workspace,
+from core.arm_teleop import (  # noqa: E402
+    ArmTeleopController,
+    ScriptedPoseSource,
+    build_workspace_limits,
+    limit_pose_step,
 )
+from core.pico_streamer import T_to_pos_rpy  # noqa: E402
 from core.xr_client import XrClient  # noqa: E402
 
 logger = logging.getLogger("test_xr_to_arm")
@@ -107,7 +106,7 @@ def _matrix4_to_rows(T: np.ndarray) -> list[list[float]]:
 
 
 def _sdk_T_to_m(T_sdk: np.ndarray) -> np.ndarray:
-    """SDK FK/IK 使用 mm 平移；PicoStreamer 使用 m 平移。"""
+    """SDK FK/IK 使用 mm 平移；项目内遥操核心使用 m 平移。"""
     T_m = T_sdk.copy()
     T_m[:3, 3] *= 0.001
     return T_m
@@ -126,117 +125,11 @@ def _parse_seed_joints(raw: str) -> list[float]:
     return vals
 
 
-def _limit_pose_step(
-    T_target: np.ndarray,
-    T_last: np.ndarray,
-    *,
-    max_step_m: float,
-    max_rot_deg: float,
-) -> np.ndarray:
-    """限制单拍目标跳变，防 PICO 丢帧或离合误触造成大步长。"""
-    T_out = T_target.copy()
-
-    delta_p = T_target[:3, 3] - T_last[:3, 3]
-    dist = float(np.linalg.norm(delta_p))
-    if max_step_m > 0.0 and dist > max_step_m:
-        T_out[:3, 3] = T_last[:3, 3] + delta_p * (max_step_m / dist)
-
-    if max_rot_deg > 0.0:
-        r_last = R.from_matrix(T_last[:3, :3])
-        r_target = R.from_matrix(T_target[:3, :3])
-        r_delta = r_last.inv() * r_target
-        rotvec = r_delta.as_rotvec()
-        angle = float(np.linalg.norm(rotvec))
-        max_angle = np.deg2rad(max_rot_deg)
-        if angle > max_angle and angle > 1e-9:
-            r_limited = r_last * R.from_rotvec(rotvec * (max_angle / angle))
-            T_out[:3, :3] = r_limited.as_matrix()
-
-    return T_out
-
-
-def _build_workspace_limits(
-    margin_m: float, center_T: np.ndarray
-) -> dict:
-    """根据当前末端位姿生成一个临时的 bounding box。
-
-    - ``margin_m <= 0``：直接复用 ``core.pico_streamer.WORKSPACE_LIMITS``；
-    - 否则：以当前末端 xyz 为中心，每个轴 ±margin_m 米，并与全局 limits 取交集，
-      避免 margin 把全局保护写穿。
-    """
-    if margin_m <= 0.0:
-        return dict(WORKSPACE_LIMITS)
-    p = center_T[:3, 3]
-    out: dict = {}
-    for i, name in enumerate(("x", "y", "z")):
-        g_lo, g_hi = WORKSPACE_LIMITS[name]
-        lo = max(g_lo, float(p[i] - margin_m))
-        hi = min(g_hi, float(p[i] + margin_m))
-        if lo >= hi:
-            raise RuntimeError(
-                f"workspace margin 计算失败：轴 {name} 当前 {p[i]:.3f} 在全局 limits "
-                f"({g_lo:.3f},{g_hi:.3f}) 之外，请检查 FK 起点或先收回安全姿态"
-            )
-        out[name] = (lo, hi)
-    return out
-
-
-class ScriptedPoseSource:
-    """无 PICO 测试输入源：复用 core 的滤波/限位，在当前位姿附近生成小幅正弦目标。"""
-
-    def __init__(
-        self,
-        *,
-        center_T: np.ndarray,
-        axis: str,
-        amp_mm: float,
-        period_s: float,
-        limits: dict,
-    ) -> None:
-        if axis not in {"auto", "x", "y", "z"}:
-            raise ValueError("--axis 只能是 auto/x/y/z")
-        if period_s <= 0.0:
-            raise ValueError("--period 必须 > 0")
-
-        self._limits = limits
-        self._center_T = clamp_workspace(center_T, limits=limits)
-        chosen_axis = (
-            self._choose_axis(self._center_T, limits) if axis == "auto" else axis
-        )
-        self._axis_idx = {"x": 0, "y": 1, "z": 2}[chosen_axis]
-        self._amp_m = max(0.0, amp_mm) * 0.001
-        self._period_s = period_s
-        self._filter = PoseEmaFilter()
-        self._filter.reset(self._center_T)
-
-        raw_xyz = center_T[:3, 3]
-        center_xyz = self._center_T[:3, 3]
-        if not np.allclose(raw_xyz, center_xyz, atol=1e-6):
-            logger.warning(
-                "当前末端超出/贴近 scripted 工作空间，中心已限位: raw=[%.3f %.3f %.3f] -> center=[%.3f %.3f %.3f]",
-                raw_xyz[0],
-                raw_xyz[1],
-                raw_xyz[2],
-                center_xyz[0],
-                center_xyz[1],
-                center_xyz[2],
-            )
-        logger.info("scripted 轨迹轴: %s", chosen_axis)
-
-    def step(self, elapsed_s: float) -> np.ndarray:
-        T = self._center_T.copy()
-        phase = 2.0 * np.pi * elapsed_s / self._period_s
-        T[self._axis_idx, 3] += self._amp_m * np.sin(phase)
-        return clamp_workspace(self._filter.apply(T), limits=self._limits)
-
-    @staticmethod
-    def _choose_axis(T_center: np.ndarray, limits: dict) -> str:
-        xyz = T_center[:3, 3]
-        scores = {}
-        for i, name in enumerate(("x", "y", "z")):
-            lo, hi = limits[name]
-            scores[name] = min(float(xyz[i] - lo), float(hi - xyz[i]))
-        return max(scores, key=scores.get)
+def _parse_vec3(raw: str) -> np.ndarray:
+    vals = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    if len(vals) != 3:
+        raise argparse.ArgumentTypeError("需要 3 个逗号分隔数值，例如 1,1,1")
+    return np.asarray(vals, dtype=np.float64)
 
 
 class MarvinArmATeleopDriver:
@@ -482,10 +375,10 @@ def main() -> None:
     ap.add_argument("--acc", type=int, default=10, help="A 臂加速度百分比 1~100")
     ap.add_argument(
         "--axis",
-        choices=("auto", "x", "-y", "z"),
+        choices=("auto", "x", "y", "z", "-x", "-y", "-z"),
         default="auto",
         help=(
-            "scripted 模式的正弦运动方向；Marvin 基座系 X=前后/Y=上下/Z=左右，"
+            "scripted 模式的正弦运动方向；可用 -x/-y/-z 做反向验证；Marvin 基座系 X=前后/Y=上下/Z=左右，"
             "auto 选当前工作空间余量最大的轴"
         ),
     )
@@ -537,6 +430,26 @@ def main() -> None:
             "右手柄请传 right。离合键自动切换：left=X 或左菜单，right=A 或右菜单。"
         ),
     )
+    ap.add_argument(
+        "--track-rotation",
+        action="store_true",
+        help="PICO 模式下同时跟随手柄相对姿态；默认只跟随平移、保持末端初始姿态",
+    )
+    ap.add_argument(
+        "--translation-scale",
+        type=float,
+        default=1.0,
+        help="PICO 手柄平移增量整体缩放，默认 1.0",
+    )
+    ap.add_argument(
+        "--xyz-scale",
+        type=_parse_vec3,
+        default=np.ones(3, dtype=np.float64),
+        help=(
+            "PICO 平移增量逐轴缩放/镜像，格式 sx,sy,sz。若含负数请用等号，"
+            "如 --xyz-scale=-1,1,1"
+        ),
+    )
     args = ap.parse_args()
 
     if args.hz <= 0:
@@ -564,17 +477,20 @@ def main() -> None:
 
     arm.connect()
     last_cmd_T = arm.get_current_pose_m()
-    limits = _build_workspace_limits(args.workspace_margin_m, last_cmd_T)
+    limits = build_workspace_limits(args.workspace_margin_m, last_cmd_T)
 
     xr: Optional[XrClient] = None
-    streamer: Optional[PicoStreamer] = None
+    arm_teleop: Optional[ArmTeleopController] = None
     if args.mode == "pico":
         xr = XrClient()
         xr.init()
-        streamer = PicoStreamer(
+        arm_teleop = ArmTeleopController(
             xr,
             workspace_limits=limits,
             side=args.controller,
+            translation_scale=args.translation_scale,
+            xyz_scale=args.xyz_scale,
+            track_rotation=args.track_rotation,
         )
 
     xyz0, rpy0 = T_to_pos_rpy(last_cmd_T)
@@ -592,10 +508,15 @@ def main() -> None:
 
     if args.mode == "pico":
         logger.info(
-            "开始 PICO -> A 臂遥操 @ %.1fHz；controller=%s，离合默认关闭，"
-            "%s 切换离合，Ctrl+C 退出。",
+            "开始 PICO -> A 臂 arm-only 遥操 @ %.1fHz；controller=%s，rotation=%s，"
+            "scale=%.2f xyz_scale=[%+.2f %+.2f %+.2f]，离合默认关闭，%s 切换离合，Ctrl+C 退出。",
             args.hz,
             args.controller,
+            "follow" if args.track_rotation else "hold",
+            args.translation_scale,
+            args.xyz_scale[0],
+            args.xyz_scale[1],
+            args.xyz_scale[2],
             "X 或左菜单" if args.controller == "left" else "A 或右菜单",
         )
     else:
@@ -640,23 +561,15 @@ def main() -> None:
                 trigger = 0.0
                 grip = 0.0
             else:
-                assert streamer is not None
-                cmd = streamer.step(T_now)
+                assert arm_teleop is not None
+                cmd = arm_teleop.step(T_now)
                 active = cmd.active
                 T_target = cmd.T_target
-                snap = streamer.last_snap
-                if snap is None:
-                    trigger = 0.0
-                    grip = 0.0
-                elif args.controller == "left":
-                    trigger = snap.left_trigger
-                    grip = snap.left_grip
-                else:
-                    trigger = snap.right_trigger
-                    grip = snap.right_grip
+                trigger = cmd.trigger
+                grip = cmd.grip
 
             if active:
-                T_limited = _limit_pose_step(
+                T_limited = limit_pose_step(
                     T_target,
                     last_cmd_T,
                     max_step_m=max_step_m,
