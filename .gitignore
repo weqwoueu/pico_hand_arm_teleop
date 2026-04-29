@@ -1,0 +1,81 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.build/
+*.whl
+pip-wheel-metadata/
+
+# ---- Virtual env / uv ----
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.python-version.local
+.uv-cache/
+
+# ---- Test / coverage / cache ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Logs ----
+*.log
+logs/
+*.pid
+
+# ---- Local agent / scratch state ----
+.codex
+.codex/
+
+# ---- Native build byproducts ----
+*.o
+*.a
+*.dylib
+*.dll
+
+# =============================================================
+# third_party 只保留"源文件 / 文档"，忽略运行期产物与本地残留
+# =============================================================
+
+# 官方 demo 在各子目录会写日志
+third_party/**/logs/
+
+# Python 缓存
+third_party/**/__pycache__/
+
+# BrainCo 示例里自带的本地 venv / 构建残留
+third_party/stark-serialport-example/python/revo_sdk/
+
+# 若你后续把 SDK 源码放进 third_party/ 里做构建，忽略构建产物
+third_party/**/build/
+third_party/**/dist/
+
+# 天机 SDK 的 Python 运行依赖预编译库需要随仓库保留。
+!third_party/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON/libKine.so
+!third_party/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON/libMarvinSDK.so
+!third_party/TJ_FX_ROBOT_CONTRL_SDK/contrlSDK/libMarvinSDK.so
+!third_party/TJ_FX_ROBOT_CONTRL_SDK/kinematicsSDK/libKine.so

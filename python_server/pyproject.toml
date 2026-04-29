@@ -1,0 +1,16 @@
+[project]
+name = "pico-hand-arm-teleop"
+version = "0.1.0"
+description = "PICO 手柄遥操作天机 Marvin M6CCS + BrainCo Revo2 的 Python 控制系统"
+readme = "README.md"
+requires-python = ">=3.10, <3.13"
+dependencies = [
+    "bc-stark-sdk>=1.4.2",
+    "colorlog>=6.10.1",
+    "numpy>=1.24",
+    "rich>=15.0.0",
+    "scipy>=1.10",
+]
+
+# 说明：xrobotoolkit_sdk 需要从 XR Robotics Toolkit 的源码/wheel 安装；
+# 不在此处作为 PyPI 依赖声明，安装方法见 ../docs/setup_guide.md。
