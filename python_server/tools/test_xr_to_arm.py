@@ -20,17 +20,12 @@
     ./run.sh -m tools.test_xr_to_arm --mode pico --controller left --hz 20 --vel 5 --acc 5 \
         --workspace-margin-m 0.10
 
-    # ④ 真机 + keyboard：无 PICO 时先测 NSP 肘平面 + xyz 小步进
-    ./run.sh -m tools.test_xr_to_arm --mode keyboard --ik-mode nsp --hz 20 --vel 5 --acc 5 \
-        --workspace-margin-m 0.05 --keyboard-step-mm 2
-
-    # 想用右手柄驱动 A 臂（不推荐）：
+    # ④ 想用右手柄驱动 A 臂（不推荐）：
     ./run.sh -m tools.test_xr_to_arm --mode pico --controller right ...
 
 操作：
 
 - ``--mode scripted``：不需要 PICO，自动在当前末端位姿附近做小幅正弦；
-- ``--mode keyboard``：方向键控制前后左右，z/x 控制上下；
 - ``--mode pico``：用 ``--controller`` 选边：
   - ``left``  → 左手柄 pose / trigger / grip，**X 键** 或 **左菜单键** 切换离合；
   - ``right`` → 右手柄 pose / trigger / grip，**A 键** 或 **右菜单键** 切换离合；
@@ -52,12 +47,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import select
 import signal
 import sys
-import termios
 import time
-import tty
 from pathlib import Path
 from typing import Optional
 
@@ -76,13 +68,16 @@ from core.arm_teleop import (  # noqa: E402
     build_workspace_limits,
     limit_pose_step,
 )
-from core.pico_streamer import T_to_pos_rpy, clamp_workspace  # noqa: E402
+from core.pico_streamer import T_to_pos_rpy  # noqa: E402
 from core.xr_client import XrClient  # noqa: E402
 
 logger = logging.getLogger("test_xr_to_arm")
 
 # SDK demo 中常用的 A 臂演示构型；dummy 模式和无反馈兜底使用。
 DEFAULT_SEED_JOINTS_DEG = [21.8, -41.0, -4.74, -63.67, 10.15, 14.72, 7.68]
+
+# PICO 坐标到 Marvin 基座平移坐标的默认镜像；实测 Y 轴方向相反。
+DEFAULT_PICO_XYZ_SCALE = np.asarray([1.0, -1.0, 1.0], dtype=np.float64)
 
 
 def _repo_root() -> Path:
@@ -138,87 +133,6 @@ def _parse_vec3(raw: str) -> np.ndarray:
     if len(vals) != 3:
         raise argparse.ArgumentTypeError("需要 3 个逗号分隔数值，例如 1,1,1")
     return np.asarray(vals, dtype=np.float64)
-
-
-class KeyboardPoseSource:
-    """终端键盘小步进输入源，保持姿态不变，只改 xyz。"""
-
-    def __init__(self, *, step_mm: float, limits: dict) -> None:
-        self._step_m = max(0.0, float(step_mm)) * 0.001
-        self._limits = limits
-        self._fd: Optional[int] = None
-        self._old_term = None
-        self._pending = ""
-
-    def __enter__(self) -> "KeyboardPoseSource":
-        if not sys.stdin.isatty():
-            raise RuntimeError("keyboard 模式需要在可交互终端里运行")
-        self._fd = sys.stdin.fileno()
-        self._old_term = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb) -> None:  # noqa: ANN001
-        if self._fd is not None and self._old_term is not None:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_term)
-        self._fd = None
-        self._old_term = None
-
-    def step(self, T_base: np.ndarray) -> tuple[bool, np.ndarray]:
-        delta = np.zeros(3, dtype=np.float64)
-        for key in self._read_keys():
-            if key == "up":
-                delta[0] += self._step_m
-            elif key == "down":
-                delta[0] -= self._step_m
-            elif key == "left":
-                delta[2] -= self._step_m
-            elif key == "right":
-                delta[2] += self._step_m
-            elif key == "z":
-                delta[1] += self._step_m
-            elif key == "x":
-                delta[1] -= self._step_m
-
-        if not np.any(np.abs(delta) > 0.0):
-            return False, T_base.copy()
-
-        T_target = T_base.copy()
-        T_target[:3, 3] += delta
-        return True, clamp_workspace(T_target, limits=self._limits)
-
-    def _read_keys(self) -> list[str]:
-        if self._fd is None:
-            return []
-
-        buf = self._pending
-        self._pending = ""
-        while select.select([sys.stdin], [], [], 0.0)[0]:
-            ch = sys.stdin.read(1)
-            if ch == "":
-                break
-            buf += ch
-
-        keys: list[str] = []
-        i = 0
-        while i < len(buf):
-            ch = buf[i]
-            if ch == "\x1b":
-                if i + 2 >= len(buf):
-                    self._pending = buf[i:]
-                    break
-                if buf[i + 1] == "[":
-                    code = buf[i + 2]
-                    key = {"A": "up", "B": "down", "C": "right", "D": "left"}.get(code)
-                    if key is not None:
-                        keys.append(key)
-                    i += 3
-                    continue
-            lower = ch.lower()
-            if lower in {"z", "x"}:
-                keys.append(lower)
-            i += 1
-        return keys
 
 
 class MarvinArmATeleopDriver:
@@ -591,9 +505,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="天机 Marvin A 臂纯测试（不接手）")
     ap.add_argument(
         "--mode",
-        choices=("scripted", "pico", "keyboard"),
+        choices=("scripted", "pico"),
         default="scripted",
-        help="scripted=无 PICO 自动小幅运动；pico=PICO 手柄遥操；keyboard=终端按键小步进",
+        help="scripted=无 PICO 自动小幅运动；pico=PICO 手柄遥操",
     )
     ap.add_argument("--dummy", action="store_true", help="不连接控制柜，只跑运动学 + IK")
     ap.add_argument(
@@ -636,12 +550,6 @@ def main() -> None:
         type=float,
         default=4.0,
         help="scripted 模式的正弦周期，单位秒",
-    )
-    ap.add_argument(
-        "--keyboard-step-mm",
-        type=float,
-        default=2.0,
-        help="keyboard 模式每次按键的 xyz 位移步长，单位 mm；方向键=前后左右，z/x=上下",
     )
     ap.add_argument(
         "--max-step-mm",
@@ -693,10 +601,10 @@ def main() -> None:
     ap.add_argument(
         "--xyz-scale",
         type=_parse_vec3,
-        default=np.ones(3, dtype=np.float64),
+        default=DEFAULT_PICO_XYZ_SCALE.copy(),
         help=(
             "PICO 平移增量逐轴缩放/镜像，格式 sx,sy,sz。若含负数请用等号，"
-            "如 --xyz-scale=-1,1,1"
+            "默认 1,-1,1；如 --xyz-scale=-1,1,1"
         ),
     )
     ap.add_argument(
@@ -727,8 +635,8 @@ def main() -> None:
         config_path=args.config if args.config is not None else _default_cfg(),
         vel_ratio=args.vel,
         acc_ratio=args.acc,
-        cart_k=[2000, 2000, 2000, 40, 40, 40, 20],
-        cart_d=[0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 1.0],
+        cart_k=[3000, 3000, 3000, 40, 40, 40, 20],
+        cart_d=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.0],
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
         ik_mode=args.ik_mode,
@@ -750,7 +658,6 @@ def main() -> None:
 
     xr: Optional[XrClient] = None
     arm_teleop: Optional[ArmTeleopController] = None
-    keyboard_source: Optional[KeyboardPoseSource] = None
     if args.mode == "pico":
         xr = XrClient()
         xr.init()
@@ -761,11 +668,6 @@ def main() -> None:
             translation_scale=args.translation_scale,
             xyz_scale=args.xyz_scale,
             track_rotation=args.track_rotation,
-        )
-    elif args.mode == "keyboard":
-        keyboard_source = KeyboardPoseSource(
-            step_mm=args.keyboard_step_mm,
-            limits=limits,
         )
 
     xyz0, rpy0 = T_to_pos_rpy(last_cmd_T)
@@ -794,15 +696,6 @@ def main() -> None:
             args.xyz_scale[2],
             args.ik_mode,
             "X 或左菜单" if args.controller == "left" else "A 或右菜单",
-        )
-    elif args.mode == "keyboard":
-        logger.info(
-            "开始 keyboard -> A 臂 arm-only 测试 @ %.1fHz；ik=%s angle=%+.1fdeg step=%.1fmm；"
-            "↑/↓=±X 前后，←/→=±Z 左右，z/x=±Y 上下，Ctrl+C 退出。",
-            args.hz,
-            args.ik_mode,
-            args.ik_nsp_angle,
-            args.keyboard_step_mm,
         )
     else:
         logger.info(
@@ -833,8 +726,6 @@ def main() -> None:
 
     t0 = time.perf_counter()
     try:
-        if keyboard_source is not None:
-            keyboard_source.__enter__()
         while not stop["flag"]:
             if args.duration > 0.0 and time.perf_counter() - t0 >= args.duration:
                 logger.info("达到 --duration %.1fs，准备退出。", args.duration)
@@ -846,10 +737,6 @@ def main() -> None:
             if scripted_source is not None:
                 active = True
                 T_target = scripted_source.step(elapsed_s)
-                trigger = 0.0
-                grip = 0.0
-            elif keyboard_source is not None:
-                active, T_target = keyboard_source.step(last_cmd_T)
                 trigger = 0.0
                 grip = 0.0
             else:
@@ -898,8 +785,6 @@ def main() -> None:
             else:
                 next_tick = time.perf_counter()
     finally:
-        if keyboard_source is not None:
-            keyboard_source.__exit__(None, None, None)
         arm.disconnect()
         if xr is not None:
             xr.close()
