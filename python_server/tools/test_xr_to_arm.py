@@ -146,6 +146,7 @@ class MarvinArmATeleopDriver:
         cart_k: list[float],
         cart_d: list[float],
         seed_joints_deg: list[float],
+        ik_debug: bool = False,
     ) -> None:
         _ensure_tj_sdk_path()
         from SDK_PYTHON.fx_kine import FX_InvKineSolvePara, Marvin_Kine  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -159,6 +160,11 @@ class MarvinArmATeleopDriver:
         self._cart_k = cart_k
         self._cart_d = cart_d
         self._last_q = list(seed_joints_deg)
+        self._ik_debug = bool(ik_debug)
+        self._ik_reject_count = 0
+        self._joint_lmt_n: Optional[np.ndarray] = None
+        self._joint_lmt_p: Optional[np.ndarray] = None
+        self._j67_lmt: Optional[np.ndarray] = None
 
         self._Marvin_Kine = Marvin_Kine
         self._FX_InvKineSolvePara = FX_InvKineSolvePara
@@ -248,6 +254,10 @@ class MarvinArmATeleopDriver:
         ini = kk.load_config(arm_type=0, config_path=str(self._config_path))
         if not ini:
             raise RuntimeError(f"load_config 失败: {self._config_path}")
+        pnva = np.asarray(ini["PNVA"][0], dtype=np.float64)
+        self._joint_lmt_n = np.minimum(pnva[:, 0], pnva[:, 1])
+        self._joint_lmt_p = np.maximum(pnva[:, 0], pnva[:, 1])
+        self._j67_lmt = np.asarray(ini["BD"][0], dtype=np.float64)
         ok = kk.initial_kine(
             robot_type=ini["TYPE"][0],
             dh=ini["DH"][0],
@@ -330,13 +340,109 @@ class MarvinArmATeleopDriver:
         if not out:
             return None
         if bool(out.m_Output_IsOutRange) or bool(out.m_Output_IsJntExd):
-            logger.warning(
-                "IK 输出越界: out_range=%s joint_exd=%s",
-                bool(out.m_Output_IsOutRange),
-                bool(out.m_Output_IsJntExd),
-            )
+            self._log_ik_reject(out)
             return None
         return out.m_Output_RetJoint.to_list()
+
+    def _log_ik_reject(self, out) -> None:  # noqa: ANN001
+        self._ik_reject_count += 1
+        ret = np.asarray(out.m_Output_RetJoint.to_list(), dtype=np.float64)
+        run_p = np.asarray(out.m_Output_RunLmtP.to_list(), dtype=np.float64)
+        run_n = np.asarray(out.m_Output_RunLmtN.to_list(), dtype=np.float64)
+        tags = [bool(out.m_Output_JntExdTags[i]) for i in range(7)]
+        violations = self._format_limit_violations(ret, run_n, run_p)
+
+        if not violations and any(tags):
+            violations = [
+                f"J{i + 1} tag=true q={ret[i]:+.2f} range=({run_n[i]:+.2f},{run_p[i]:+.2f})"
+                for i, tag in enumerate(tags)
+                if tag
+            ]
+
+        detail = "; ".join(violations) if violations else "无逐轴越界细节"
+        logger.warning(
+            "IK 输出越界: out_range=%s joint_exd=%s exd_abs=%.3f；%s",
+            bool(out.m_Output_IsOutRange),
+            bool(out.m_Output_IsJntExd),
+            float(out.m_Output_JntExdABS),
+            detail,
+        )
+
+        if self._ik_debug or self._ik_reject_count <= 3 or self._ik_reject_count % 50 == 0:
+            logger.warning(
+                "IK ret_joint=[%s] run_n=[%s] run_p=[%s] tags=%s",
+                self._fmt_vec(ret),
+                self._fmt_vec(run_n),
+                self._fmt_vec(run_p),
+                tags,
+            )
+            self._log_all_ik_candidates(out)
+
+    def _log_all_ik_candidates(self, out) -> None:  # noqa: ANN001
+        if self._joint_lmt_n is None or self._joint_lmt_p is None:
+            return
+        n_result = max(0, min(int(out.m_OutPut_Result_Num), 8))
+        if n_result == 0:
+            logger.warning("IK all_joint 为空。")
+            return
+        all_q = np.asarray(out.m_OutPut_AllJoint.to_list(), dtype=np.float64).reshape(8, 8)
+        for i in range(n_result):
+            q = all_q[i, :7]
+            lower, upper = self._candidate_run_limits(q)
+            violations = self._format_limit_violations(q, lower, upper)
+            verdict = "运行限位OK" if not violations else "; ".join(violations)
+            logger.warning(
+                "IK candidate[%d] q=[%s] -> %s",
+                i,
+                self._fmt_vec(q),
+                verdict,
+            )
+
+    def _candidate_run_limits(self, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert self._joint_lmt_n is not None and self._joint_lmt_p is not None
+        lower = self._joint_lmt_n.copy()
+        upper = self._joint_lmt_p.copy()
+        if self._j67_lmt is None:
+            return lower, upper
+
+        j6 = float(q[5])
+        if j6 > 1.0:
+            j6_eval = min(j6, float(upper[5]))
+            pp = self._j67_lmt[0]
+            pn = self._j67_lmt[3]
+            upper[6] = min(float(upper[6]), self._poly2(pp, j6_eval))
+            lower[6] = max(float(lower[6]), self._poly2(pn, j6_eval))
+        elif j6 < -1.0:
+            j6_eval = min(j6, float(upper[5]))
+            np_lmt = self._j67_lmt[1]
+            nn = self._j67_lmt[2]
+            upper[6] = min(float(upper[6]), self._poly2(np_lmt, j6_eval))
+            lower[6] = max(float(lower[6]), self._poly2(nn, j6_eval))
+        return lower, upper
+
+    @staticmethod
+    def _poly2(coeff: np.ndarray, x: float) -> float:
+        return float(coeff[0] * x * x + coeff[1] * x + coeff[2])
+
+    @staticmethod
+    def _format_limit_violations(
+        q: np.ndarray,
+        lower: np.ndarray,
+        upper: np.ndarray,
+        *,
+        eps: float = 1e-6,
+    ) -> list[str]:
+        out: list[str] = []
+        for i, (qi, lo, hi) in enumerate(zip(q, lower, upper, strict=True)):
+            if qi < lo - eps:
+                out.append(f"J{i + 1} {qi:+.2f} < {lo:+.2f} by {lo - qi:.2f}deg")
+            elif qi > hi + eps:
+                out.append(f"J{i + 1} {qi:+.2f} > {hi:+.2f} by {qi - hi:.2f}deg")
+        return out
+
+    @staticmethod
+    def _fmt_vec(v: np.ndarray) -> str:
+        return " ".join(f"{float(x):+.2f}" for x in v)
 
 
 def main() -> None:
@@ -450,6 +556,11 @@ def main() -> None:
             "如 --xyz-scale=-1,1,1"
         ),
     )
+    ap.add_argument(
+        "--ik-debug",
+        action="store_true",
+        help="IK 被 soft-limit 拒绝时，每次都打印 ret_joint、运行限位和所有候选解的限位粗判",
+    )
     args = ap.parse_args()
 
     if args.hz <= 0:
@@ -464,6 +575,7 @@ def main() -> None:
         cart_k=[2000, 2000, 2000, 40, 40, 40, 20],
         cart_d=[0.1, 0.1, 0.1, 0.3, 0.3, 0.3, 1.0],
         seed_joints_deg=args.seed_joints,
+        ik_debug=args.ik_debug,
     )
 
     stop = {"flag": False}

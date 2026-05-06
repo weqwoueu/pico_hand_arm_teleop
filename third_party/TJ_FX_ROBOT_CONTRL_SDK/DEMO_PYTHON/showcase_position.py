@@ -107,13 +107,17 @@ logger.info(f'current joint={sub_data["outputs"][0]["fb_joint_pos"]}')
 #ogger.info(f'set joint={sub_data["inputs"][1]["joint_cmd_pos"]}')
 #ogger.info(f'current joint={sub_data["outputs"][1]["fb_joint_pos"]}')
 
+
 '''点位2'''
+#RESET_JOINT_TARGET = np.array([0.55201099,-1.57590316,-1.56055124,-1.3581873,0.00168599,-0.75184421,0.03362202])
+
 robot.clear_set()
-joint_cmd_2=[0.,0.,0.,0.,0.,0.,0.]
+joint_cmd_2=[40.6279, -60.2926, -89.4130, -70.8184, 0.0966, -20.0775, 0.9264]
 robot.set_joint_cmd_pose(arm='A',joints=joint_cmd_2)
 #obot.set_joint_cmd_pose(arm='B',joints=joint_cmd_2)
 robot.send_cmd()
 time.sleep(3) #预留运动时间
+
 
 
 '''订阅数据查看是否到位'''
@@ -124,6 +128,7 @@ logger.info(f'current joint={sub_data["outputs"][0]["fb_joint_pos"]}')
 #ogger.info('-----------\nB arm:')
 #ogger.info(f'set joint={sub_data["inputs"][1]["joint_cmd_pos"]}')
 #ogger.info(f'current joint={sub_data["outputs"][1]["fb_joint_pos"]}')
+
 
 
 '''下使能'''
