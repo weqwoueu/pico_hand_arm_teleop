@@ -1,248 +1,494 @@
-# 环境与启动说明
+# 新电脑环境与联调手册
 
-本系统直接在一台 Linux 主机上跑 Python 主循环，无需 Unity，也不再使用 UDP。
-数据链路为：
+这份文档按“换一台电脑继续干活”的顺序写。目标不是只跑一个 demo，而是把整条路线接起来：
 
 ```text
-PICO 4 / PICO 4 Ultra (右手柄)
-        │
-        │  xrobotoolkit_sdk (XRoboToolkit)
-        ▼
-    XrClient  ->  PicoStreamer  ->  TianjiRevoHardwareNode
-                                   ├─ Tianji Marvin M6CCS (7DoF)
-                                   └─ BrainCo Revo2 灵巧手
+PICO 头显 / 手柄
+  -> XRoboToolkit PC Service
+  -> xrobotoolkit_sdk
+  -> python_server
+  -> 天机 Marvin A 臂 arm-only / NSP 臂角控制
+  -> Revo2 手
+  -> PICO 摇操采集数据
+  -> 后续训练
 ```
 
-## 1. 创建 Python 环境（uv 管理，**必须 Python 3.10**）
+当前阶段重点是 **PICO 控 A 臂**。手臂测顺以后，再把 Revo2 手接回来，最后做同步数据采集。
 
-`xrobotoolkit_sdk` 预编译的 `.so` 是 `cpython-310`，用其他版本 import 时会直接报 ABI 不匹配。
+## 0. 旧电脑推送前检查
+
+在旧电脑仓库根目录：
 
 ```bash
-cd python_server
+git status --short --branch
+```
+
+确认要带走的改动都提交。当前 arm-only 相关核心改动在：
+
+```text
+python_server/tools/test_xr_to_arm.py
+docs/setup_guide.md
+```
+
+如果 `third_party/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/showcase_position.py` 只是现场试动作留下的草稿，不想带到新电脑，就不要 `git add` 它。
+
+推全部本地分支到 GitHub：
+
+```bash
+git push -u origin --all
+git push origin --tags
+```
+
+以后某个分支已经绑定 upstream 后，在那个分支上直接：
+
+```bash
+git push
+```
+
+## 1. 新电脑拉仓库
+
+```bash
+cd ~
+git clone https://github.com/weqwoueu/pico_hand_arm_teleop.git
+cd pico_hand_arm_teleop
+git branch -a
+git switch 臂角控制优化
+```
+
+如果你想从别的分支继续：
+
+```bash
+git switch 手臂控制解耦
+# 或
+git switch master
+```
+
+## 2. 系统依赖
+
+推荐 Ubuntu 22.04 / 24.04，Python 必须用 3.10。`xrobotoolkit_sdk` 是 `cpython-310` ABI，用 3.11/3.12 会 import 失败。
+
+```bash
+sudo apt update
+sudo apt install -y git curl build-essential python3.10 python3.10-venv
+```
+
+安装 uv：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+uv --version
+```
+
+创建 Python 环境：
+
+```bash
+cd ~/pico_hand_arm_teleop/python_server
 uv venv --python 3.10
 uv sync
 ```
 
-> `.python-version` 已经钉死 3.10.x，正常情况下 `uv sync` 自己就会装对版本。
-
-运行时需要给 Revo2 的串口开权限（每次插拔 USB 之后都要再来一遍，也可以做 udev 规则一劳永逸）：
+基础自检：
 
 ```bash
-sudo chmod 666 /dev/ttyUSB0
+./run.sh -m py_compile tools/test_xr_to_arm.py
+./run.sh -c "import numpy, scipy; print('python deps ok')"
 ```
 
-## 2. 安装 XRoboToolkit（PC Service + pybind 两侧都要）
+`python_server/.venv/` 不进 git，新电脑必须重新 `uv sync`。
 
-PICO 数据链路由两段组成，**两段都要齐**：
+## 3. XRoboToolkit 安装
 
-```
-PICO 头显客户端 APK ──(TCP/UDP 局域网)──► PC Service (系统级服务)
-                                           ▲
-                                           │ gRPC (localhost)
-                                           ▼
-                            libPXREARobotSDK.so (客户端动态库)
-                                           ▲
-                                           │ import
-                                           ▼
-                            xrobotoolkit_sdk.cpython-310-*.so (pybind)
+PICO 数据链路需要两部分都齐：
+
+```text
+PICO APK
+  -> /opt/apps/roboticsservice/RoboticsService
+  -> libPXREARobotSDK.so
+  -> xrobotoolkit_sdk.cpython-310-*.so
+  -> python_server/core/xr_client.py
 ```
 
-### 2.1 PC Service（系统级服务进程，.deb 安装）
+### 3.1 安装 PC Service
 
-下载 Ubuntu 22.04 amd64 预编译包（Releases v1.0.0，~97 MB）：
+已验证版本是 v1.0.0 Ubuntu 22.04 amd64：
 
 ```bash
-# 直链（GitHub Releases）
 cd ~/Downloads
 wget https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
 
 sudo dpkg -i XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
-sudo apt-get install -f    # 如果缺依赖，这条会补上
+sudo apt-get install -f
 ```
 
-注册的 dpkg 包名是 **`roboticsservice`**（不是 `xrobototoolkit-pc-service`，厂商 "Hainan Chuangjian Weilai"）。以后排查用：
+包名是 `roboticsservice`：
 
 ```bash
-dpkg -l roboticsservice                     # 查状态和版本
-dpkg -L roboticsservice                     # 列出所有已装文件
-sudo apt-mark hold roboticsservice          # 锁版本，防误升级
-dpkg -S /opt/apps/roboticsservice/xxx       # 反查某文件归哪个包
+dpkg -l roboticsservice
+dpkg -L roboticsservice | head
 ```
 
-安装后的布局（本机已验证）：
+常用路径：
 
-| 用途 | 路径 |
-| --- | --- |
-| 安装根 | `/opt/apps/roboticsservice/` |
-| **Service 启动脚本** | `/opt/apps/roboticsservice/runService.sh` |
-| 2D Qt 调试面板 | `/opt/apps/roboticsservice/run2D.sh` |
-| 3D Unity 演示 | `/opt/apps/roboticsservice/run3D.sh` |
-| 数据录制器 | `/opt/apps/roboticsservice/runRobotDataRecorder.sh` |
-| SDK 头文件 | `/opt/apps/roboticsservice/SDK/include/PXREARobotSDK.h` |
-| 配置文件 | `/opt/apps/roboticsservice/setting.ini` |
+```text
+/opt/apps/roboticsservice/runService.sh
+/opt/apps/roboticsservice/run2D.sh
+/opt/apps/roboticsservice/setting.ini
+```
 
-> 没有注册 systemd unit，**需要手动**开一个终端跑 `runService.sh`。注意：`runService.sh` 是个 **launcher**，执行完会立刻 return（把 Service 派生到后台），真正的进程名是 `RoboticsService`（不是 `roboticsservice`，大小写有差），想确认是否在跑：
->
-> ```bash
-> pgrep -af RoboticsService | grep -v grep
-> sudo ss -tlnp | grep RoboticsService
-> ```
-
-Service 启动后会监听两个 TCP 端口（本机已验证）：
-
-| 端口 | 监听地址 | 用途 |
-| --- | --- | --- |
-| `60061` | `127.0.0.1` 仅本机 | gRPC，给 pybind / 本机 SDK 客户端用（`xrobotoolkit_sdk.init()` 连的就是这里） |
-| `63901` | `*` 所有网卡 | TCP，给 PICO 头显客户端 APK 连（局域网发现 + 对话） |
-
-### 2.2 Pybind（Python 客户端绑定）
-
-仓库：<https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind>
-
-本机源码在 `~/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/`。因为 `uv pip install .` 跑 CMake 构建时找不到 pybind11，这里**绕开 uv**，直接把编译好的 `.so` 手动拷贝进 venv：
+启动 Service：
 
 ```bash
-SRC=~/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64
-DST=~/pico_hand_arm_teleop/python_server/.venv/lib/python3.10/site-packages
-cp "$SRC/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so" "$DST/"
+/opt/apps/roboticsservice/runService.sh
+pgrep -af RoboticsService | grep -v grep
 ```
 
-运行期这个 `.so` 还依赖 `libPXREARobotSDK.so`（客户端动态库，跟着 pybind 仓库一起的）：
+正常会看到 `RoboticsService` 进程。端口一般是：
 
+```bash
+ss -tlnp | grep -E '60061|63901'
 ```
-~/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib/libPXREARobotSDK.so
+
+```text
+127.0.0.1:60061  # Python pybind / gRPC
+0.0.0.0:63901    # PICO APK 连接
 ```
 
-### 2.3 `python_server/run.sh`：所有 Python 命令的统一入口
+### 3.2 准备 pybind `.so`
 
-**不要直接 `python -m tools.xxx`**，会因为 `LD_LIBRARY_PATH` 找不到 `libPXREARobotSDK.so` 报错。`run.sh` 替你做了三件事：
+这部分不在本仓库里，因为它是本机 venv 运行依赖。最稳做法：从旧电脑把整个 pybind 目录拷到新电脑，例如放在：
 
-- 注入 `LD_LIBRARY_PATH` 指向 pybind 仓库的 `lib/`
-- 强制用 `.venv/bin/python`，不沾系统 python
-- 自动 `cd` 到 `python_server/`，让 `-m tools.xxx` / `-m main` 的相对导入正常工作
+```text
+~/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/
+```
 
-用法：
+这个目录里至少要有：
+
+```text
+xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so
+lib/libPXREARobotSDK.so
+```
+
+如果要从官方仓库重新拿，仓库地址是：
+
+```text
+https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind
+```
+
+但注意：如果官方仓库没有现成编译产物，优先从旧电脑拷贝已验证那份。
+
+把 Python pybind `.so` 复制进当前 venv：
 
 ```bash
 cd ~/pico_hand_arm_teleop/python_server
-./run.sh -m tools.test_xr_stream     # 10Hz 打印 PICO 数据
-./run.sh -m tools.test_hand_basic    # Revo2 开合验证
-./run.sh -m tools.test_hand_mapping  # Revo2 + 映射管线
-./run.sh -m main                     # 100Hz 主循环
+
+export XRT_PYBIND_DIR="$HOME/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64"
+export XRT_LIB_DIR="$XRT_PYBIND_DIR/lib"
+
+PY_SITE="$(./.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+cp "$XRT_PYBIND_DIR/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so" "$PY_SITE/"
 ```
 
-> 自定义 SDK lib 目录：`XRT_LIB_DIR=/some/other/lib ./run.sh ...`
-
-### 2.4 完整联调顺序（实机验证时）
-
-1. 终端 A：`/opt/apps/roboticsservice/runService.sh`（前台阻塞，盯日志）
-2. PICO 头显：启动配套 Unity 客户端 APK，确认与 PC 同局域网，等 Service 日志出现 "device find" / "device connect"
-3. （可选）终端 B：`/opt/apps/roboticsservice/run2D.sh` 打开 Qt 面板，**勾选 Tracking 子类**（Head/Controller/Hand 至少勾前两个），否则 Pybind 那边拿到的一直是 0
-4. 终端 C：`cd ~/pico_hand_arm_teleop/python_server && ./run.sh -m tools.test_xr_stream`，应看到 pose/trigger/grip 随手柄实时变化
-
-## 3. 安装 Revo2 SDK（可选：当前 Dummy 驱动无需）
-
-示例代码位于 `third_party/stark-serialport-example/python/revo2/`，按其 README 安装即可：
+建议把 `XRT_LIB_DIR` 写进 shell 配置：
 
 ```bash
-cd third_party/stark-serialport-example/python
-uv pip install -r requirements.txt
+echo 'export XRT_LIB_DIR="$HOME/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-## 4. 安装天机机械臂 SDK
-
-按厂方 SDK 文档连接 Tianji Marvin M6CCS（网口/笛卡尔伺服）。在
-`python_server/core/hardware_node.py` 的 `TianjiArmDriver` 内把 `TODO` 替换为真实调用。
-
-## 5. 启动服务
-
-前提：PC Service 已在另一个终端 `runService.sh` 跑着，PICO 头显已连上（见 2.4）。
+验证 import：
 
 ```bash
-cd python_server
-./run.sh -m main
+cd ~/pico_hand_arm_teleop/python_server
+./run.sh -c "import xrobotoolkit_sdk as xrt; print(xrt.__file__)"
 ```
 
-（别用 `uv run python main.py`，会丢 `LD_LIBRARY_PATH`；`run.sh` 封装了所有环境。）
+如果这里报 `libPXREARobotSDK.so` 找不到，就是 `XRT_LIB_DIR` 没配对。
 
-启动后效果：
+### 3.3 验证 PICO 数据
 
-- 戴上 PICO，右手柄握持；
-- 按下右手柄 **A 键** 或 **菜单键** 激活离合（再次按下取消）；
-- 激活后，手柄移动会映射为末端笛卡尔增量，机械臂跟随；
-- `right_trigger` 控制食指弯曲；`right_grip` 控制中指/无名指/小指同步弯曲。
+1. 新电脑和 PICO 在同一局域网。
+2. 电脑上启动 `/opt/apps/roboticsservice/runService.sh`。
+3. PICO 里启动配套 APK，等 Service 日志出现 device connect。
+4. 如数据全 0，打开 `/opt/apps/roboticsservice/run2D.sh`，确认 Tracking 相关项有勾选。
 
-## 6. 常见问题
+测试：
 
-- `xrobotoolkit_sdk` 未安装：程序会以 dummy 模式运行，所有位姿返回默认值，便于上层调试。
-- 机械臂不动：确认已按下 A/菜单键进入激活态，并检查日志 `离合激活` 提示。
-- 控制抖动：调小 `python_server/core/pico_streamer.py` 中的 `EMA_ALPHA_*`。
-- 超出工作空间：查看 `WORKSPACE_LIMITS` 是否与你机器人的布置一致。
+```bash
+cd ~/pico_hand_arm_teleop/python_server
+./run.sh -m tools.test_xr_stream
+```
 
-## 7. 目录结构（Python 侧）
+手柄动、trigger/grip/A/menu 变化时日志应该跟着变。
+
+## 4. 天机 Marvin A 臂
+
+天机 SDK 已放在仓库里，关键文件已经被 git 跟踪：
 
 ```text
-python_server/
-  run.sh                  # 环境封装：注入 LD_LIBRARY_PATH + .venv/bin/python
-  main.py                 # 100Hz 主循环
-  pyproject.toml
-  uv.lock
-  .python-version         # 3.10
-  .venv/                  # uv 管的虚拟环境（名: pico-hand-arm-teleop）
-  core/
-    __init__.py
-    xr_client.py          # XRoboToolkit SDK 安全封装
-    pico_streamer.py      # 位姿变换 / 离合 / EMA 滤波 / 工作空间限位
-    hardware_node.py      # Tianji + Revo2 Dummy 驱动
-    mapping_utils.py      # Revo2 手指映射
-  tools/                  # 独立测试脚本（不跑主循环）
-    test_hand_basic.py    # 纯 SDK 开合循环
-    test_hand_mapping.py  # 映射管线 + 模拟 trigger/grip 驱手 (100Hz)
-    test_xr_stream.py     # 只读 PICO 数据, 10Hz 打印
+third_party/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON/libKine.so
+third_party/TJ_FX_ROBOT_CONTRL_SDK/SDK_PYTHON/libMarvinSDK.so
+third_party/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/ccs_m6_31.MvKDCfg
 ```
 
-## 8. 工作日志与下次接入点
+新电脑一般不用额外安装天机 Python SDK，但要保证：
 
-### 2026-04-20 进展
+- 控制柜和电脑网线/网络通。
+- `MARVIN_IP` 对。
+- 没有旧进程占用 SDK 端口。
+- 急停在手边。
 
-**完成**
-- [x] PC Service `.deb` 安装到 `/opt/apps/roboticsservice/`（v1.0.0 ubuntu-22.04-amd64）
-- [x] pybind `.so`（cp310）手动 cp 进 `.venv/site-packages/`，`import xrobotoolkit_sdk` OK
-- [x] 写 `python_server/run.sh` 封装 `LD_LIBRARY_PATH`，烟测通过
-- [x] 干跑 `./run.sh -m tools.test_xr_stream`：`xrt.init()` 成功、10Hz 主循环不崩、pose 全 0（因为 Service 还没启）
-- [x] `xr_client.py` 里的 SDK 兼容命名全对上了 `xrt` 实际属性（`init/close/get_A_button/get_right_menu_button/...`）
+设置 IP：
 
-### 2026-04-21 进展
+```bash
+export MARVIN_IP=192.168.71.190
+```
 
-**完成**
-- [x] ② 实机验证：PC Service 起、PICO APK 连上、`./run.sh -m tools.test_xr_stream` 看到 head/ctrl pose 实时变化，trigger/grip/A/menu 全部响应
-- [x] 确认 Service 监听两个端口：`127.0.0.1:60061` (gRPC 给 pybind) + `*:63901` (给 PICO APK)
-- [x] 确认 `.deb` 装的 `libPXREARobotSDK.so` 和 pybind 用的那份 **sha256 一致**，不存在版本分叉
-- [x] 确认 `.deb` 真实包名是 `roboticsservice`（海南创见未来）
+先跑 scripted 小幅自检：
 
-**下次接上的第一步**
-1. 先做 ③ 之前建议：跑一次 `./run.sh -m main`（Dummy 手 + Dummy 臂 + 真实 PICO），确认 `PicoStreamer` 的坐标变换/去偏航/离合/EMA/workspace clamp 对真实数据都没崩——这是真实数据第一次过整条业务管线，有必要先 sanity check
-2. 然后读 `third_party/stark-serialport-example/python/revo2/revo2_ctrl_right.py` + `revo2_utils.py`，决定 Revo2HandDriver 接法（后台 asyncio 线程 or `asyncio.run` 包装）
-3. 写真实 `Revo2HandDriver`，替换 `hardware_node.py` 里的 Dummy
+```bash
+cd ~/pico_hand_arm_teleop/python_server
+./run.sh -m tools.test_xr_to_arm \
+  --mode scripted \
+  --axis auto \
+  --duration 6 \
+  --amp-mm 5 \
+  --hz 20 \
+  --vel 5 \
+  --acc 5 \
+  --workspace-margin-m 0.05 \
+  --ik-mode nsp
+```
 
-**随后（顺序不硬性）**
-- [ ] ④ 拿到天机 SDK 后替换 `TianjiArmDriver`
-- [ ] ⑤ 完整联调 `./run.sh -m main`（真实 PICO + 真实 Revo2 + 真实天机）
+再跑 PICO 控 A 臂：
 
-**尚未处理的小坑**
-- `python_server/.git` 是 `uv init` 留下的子仓库，需要 `rm -rf python_server/.git` 然后根目录 `git init`——下次动手前先确认一次
-- `test_xr_stream.py` 没装 signal handler，SIGTERM 杀不干净（今天被沙盒以 root 起过一次进程，kill 不动需要 `sudo kill -9`）；之后给它加个 `--duration` 参数 + signal handler 会更顺手
-- `~/.bashrc` 里其实**没有** `LD_LIBRARY_PATH` 的导出（之前笔记说"已写进"不对），而且 `.bashrc` 非交互 shell 直接 return 也写不进去有效——已决定用 `run.sh` 项目本地方案，全局不动
+```bash
+./run.sh -m tools.test_xr_to_arm \
+  --mode pico \
+  --controller left \
+  --hz 20 \
+  --vel 5 \
+  --acc 5 \
+  --workspace-margin-m 0.10 \
+  --max-step-mm 4 \
+  --ik-mode nsp
+```
 
-**关键路径速查**
+当前约定：
 
-| 名称 | 路径 |
-| --- | --- |
-| pybind 源码 / `libPXREARobotSDK.so` 目录 | `~/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/` |
-| pybind `.so` 目标位置 | `~/pico_hand_arm_teleop/python_server/.venv/lib/python3.10/site-packages/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so` |
-| PC Service Start | `/opt/apps/roboticsservice/runService.sh` |
-| PC Service 2D 面板 | `/opt/apps/roboticsservice/run2D.sh` |
-| PC Service 配置 | `/opt/apps/roboticsservice/setting.ini` |
-| 项目统一入口 | `~/pico_hand_arm_teleop/python_server/run.sh` |
-| 下载的 `.deb` 存档 | `~/Downloads/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb` |
+- A 臂按左臂用，默认 `--controller left`。
+- 离合键：左手柄 `X` 或左菜单键。
+- 默认只跟随平移，末端姿态保持离合激活瞬间不变。
+- `--track-rotation` 才会跟随手柄相对姿态。
+- PICO 平移默认 `--xyz-scale=1,-1,1`，因为实测 Y 方向反了。
 
+如果新电脑/新摆位发现 Y 又反了，临时切回：
+
+```bash
+--xyz-scale=1,1,1
+```
+
+如果 X/Z 也要镜像，用等号传负数，避免 argparse 把 `-1` 当选项：
+
+```bash
+--xyz-scale=-1,-1,1
+```
+
+### NSP 臂角控制说明
+
+NSP 在这里按 **Null-Space Plane** 理解，也就是零空间臂角平面。
+
+`test_xr_to_arm.py --ik-mode nsp` 的流程是：
+
+1. 启动时读取当前 A 臂关节角。
+2. 用 `fk_nsp()` 从当前姿态提取臂角平面。
+3. 后续 IK 用 `ik_nsp()` 尽量保持这个臂角平面，让肘关节别乱翻。
+
+所以启动 NSP 前，先把 A 臂摆到你满意的人形参考姿态。之前比较像人的参考姿态是：
+
+```text
+[40.6279, -60.2926, -89.4130, -70.8184, 0.0966, -20.0775, 0.9264] deg
+```
+
+不要在 J4 接近 0 度、肘关节近似伸直时启 NSP；SDK 文档也说参考姿态第四关节不能为零，否则臂角平面退化。
+
+如果需要微调肘方向：
+
+```bash
+--ik-nsp-angle 15
+# 或
+--ik-nsp-angle -15
+```
+
+左臂方向按 SDK demo 注释：想让肘往上翘通常先试正角度；不对就反向。
+
+## 5. Revo2 手
+
+当前先测臂，手后面接回来。新电脑准备 Revo2 时：
+
+```bash
+cd ~/pico_hand_arm_teleop/python_server
+uv sync
+```
+
+`bc-stark-sdk` 已在 `pyproject.toml` 里。插上 USB-RS485 后给串口权限：
+
+```bash
+ls /dev/ttyUSB*
+sudo chmod 666 /dev/ttyUSB0
+```
+
+长期方案：
+
+```bash
+sudo usermod -aG dialout $USER
+# 重新登录后生效
+```
+
+纯手开合测试：
+
+```bash
+./run.sh -m tools.test_hand_basic
+```
+
+PICO -> Revo2 测试：
+
+```bash
+./run.sh -m tools.test_xr_to_hand
+```
+
+注意：`test_xr_to_hand.py` 当前不是 argparse 脚本，不要用 `--help`，它会真的开始连 PICO 和 Revo2。
+
+## 6. 后续整体遥操与采数据
+
+目标路线建议分三步：
+
+1. **arm-only 稳定**：`tools.test_xr_to_arm --mode pico --ik-mode nsp` 能长时间稳定跑，方向、臂角、限位都可控。
+2. **hand-only 稳定**：`tools.test_xr_to_hand` 能稳定用 trigger/grip 控 Revo2。
+3. **arm + hand + record**：把 arm target、arm feedback、hand command、hand feedback、PICO pose/buttons 同步写成 episode。
+
+采数据时至少记录这些字段：
+
+```text
+timestamp_ns
+episode_id
+head_pose
+left_controller_pose
+right_controller_pose
+trigger / grip / buttons
+arm_target_T
+arm_feedback_joint
+arm_feedback_T
+hand_command_positions
+hand_feedback_positions
+mode / clutch_state / safety_flags
+```
+
+建议一开始同时存：
+
+- raw PICO 数据
+- 映射后的 arm/hand command
+- 机器人实际 feedback
+
+这样后面训练时既能学端到端，也能回放和修映射逻辑。
+
+## 7. 常见问题
+
+### `run.sh` 提示 `XRT_LIB_DIR 不存在`
+
+新电脑上 pybind 目录位置和旧电脑不同。设置：
+
+```bash
+export XRT_LIB_DIR="$HOME/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"
+```
+
+再跑：
+
+```bash
+./run.sh -c "import xrobotoolkit_sdk as xrt; print(xrt.__file__)"
+```
+
+### `xrobotoolkit_sdk` import 失败
+
+检查三件事：
+
+```bash
+python --version
+ls python_server/.venv/lib/python3.10/site-packages/xrobotoolkit_sdk*.so
+echo "$XRT_LIB_DIR"
+ls "$XRT_LIB_DIR/libPXREARobotSDK.so"
+```
+
+必须是 Python 3.10，对应 `cpython-310`。
+
+### PICO 数据全 0
+
+- PC Service 是否启动。
+- PICO APK 是否连上这台电脑。
+- 新电脑防火墙是否挡了 `63901`。
+- `run2D.sh` 里 Tracking 相关项是否勾选。
+
+### 天机报 `port bind failure` / 控制柜连接失败
+
+常见原因是上一次 Ctrl+Z 把进程挂后台，没有释放 SDK 端口。
+
+```bash
+jobs -l
+fg %1
+# 回到前台后 Ctrl+C
+```
+
+如果找不到 job：
+
+```bash
+pgrep -af test_xr_to_arm
+kill <pid>
+```
+
+然后重新跑。不要用 Ctrl+Z 停真机控制脚本，退出用 Ctrl+C。
+
+### IK 经常失败或肘关节翻
+
+- 起始姿态先摆成人形参考姿态，再启动 `--ik-mode nsp`。
+- J4 不要接近 0 度。
+- 工作空间先加 `--workspace-margin-m 0.05` 或 `0.10`。
+- 速度加速度先用 `--vel 5 --acc 5`。
+- 打开诊断：
+
+```bash
+--ik-debug
+```
+
+### Revo2 自动探测失败
+
+- 确认 `/dev/ttyUSB*` 存在。
+- 确认权限：`sudo chmod 666 /dev/ttyUSB0`。
+- 确认手已上电、USB-RS485 接线正常。
+
+## 8. 常用命令速查
+
+```bash
+# 拉仓库
+git clone https://github.com/weqwoueu/pico_hand_arm_teleop.git
+cd pico_hand_arm_teleop
+git switch 臂角控制优化
+
+# Python 环境
+cd python_server
+uv venv --python 3.10
+uv sync
+
+# PICO 数据
+./run.sh -m tools.test_xr_stream
+
+# A 臂 scripted
+export MARVIN_IP=192.168.71.190
+./run.sh -m tools.test_xr_to_arm --mode scripted --axis auto --duration 6 --amp-mm 5 --hz 20 --vel 5 --acc 5 --workspace-margin-m 0.05 --ik-mode nsp
+
+# PICO 控 A 臂
+./run.sh -m tools.test_xr_to_arm --mode pico --controller left --hz 20 --vel 5 --acc 5 --workspace-margin-m 0.10 --max-step-mm 4 --ik-mode nsp
+
+# Revo2 手
+./run.sh -m tools.test_hand_basic
+./run.sh -m tools.test_xr_to_hand
+```

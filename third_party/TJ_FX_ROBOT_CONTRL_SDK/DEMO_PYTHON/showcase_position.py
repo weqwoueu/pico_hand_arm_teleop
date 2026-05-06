@@ -130,6 +130,25 @@ logger.info(f'current joint={sub_data["outputs"][0]["fb_joint_pos"]}')
 #ogger.info(f'current joint={sub_data["outputs"][1]["fb_joint_pos"]}')
 
 
+"""
+robot.clear_set()
+joint_cmd_2=[0, 0, 0, 0, 0, 0, 0]
+robot.set_joint_cmd_pose(arm='A',joints=joint_cmd_2)
+#obot.set_joint_cmd_pose(arm='B',joints=joint_cmd_2)
+robot.send_cmd()
+time.sleep(3) #预留运动时间
+
+
+'''订阅数据查看是否到位'''
+sub_data=robot.subscribe(dcss)
+logger.info('-----------\nA arm:')
+logger.info(f'set joint={sub_data["inputs"][0]["joint_cmd_pos"]}')
+logger.info(f'current joint={sub_data["outputs"][0]["fb_joint_pos"]}')
+#ogger.info('-----------\nB arm:')
+#ogger.info(f'set joint={sub_data["inputs"][1]["joint_cmd_pos"]}')
+#ogger.info(f'current joint={sub_data["outputs"][1]["fb_joint_pos"]}')
+"""
+
 
 '''下使能'''
 robot.clear_set()
