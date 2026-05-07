@@ -83,6 +83,23 @@ for candidate in "${XRT_LIB_DIR_CANDIDATES[@]}"; do
     fi
 done
 
+# Upstream pybind git does not ship libPXREARobotSDK.so; it comes with the PC Service .deb (setup_guide §2.1).
+if [[ -z "$XRT_LIB_DIR_FOUND" ]]; then
+    pc_sdk_so=""
+    if [[ "$ARCH" == "x86_64" && -f /opt/apps/roboticsservice/SDK/x64/libPXREARobotSDK.so ]]; then
+        pc_sdk_so="/opt/apps/roboticsservice/SDK/x64/libPXREARobotSDK.so"
+    elif [[ "$ARCH" == "aarch64" && -f /opt/apps/roboticsservice/SDK/aarch64/libPXREARobotSDK.so ]]; then
+        pc_sdk_so="/opt/apps/roboticsservice/SDK/aarch64/libPXREARobotSDK.so"
+    fi
+    if [[ -n "$pc_sdk_so" ]]; then
+        echo "[INFO] libPXREARobotSDK.so missing in pybind checkout; linking from PC Service install:"
+        echo "       $pc_sdk_so -> $XRT_DIR/lib/libPXREARobotSDK.so"
+        mkdir -p "$XRT_DIR/lib"
+        ln -sfn "$pc_sdk_so" "$XRT_DIR/lib/libPXREARobotSDK.so"
+        XRT_LIB_DIR_FOUND="$XRT_DIR/lib"
+    fi
+fi
+
 if [[ -z "$XRT_LIB_DIR_FOUND" ]]; then
     echo "[WARN] libPXREARobotSDK.so was not found under $XRT_DIR/lib." >&2
     echo "[WARN] If the pybind install fails, copy a known-good XRoboToolkit pybind bundle here:" >&2
