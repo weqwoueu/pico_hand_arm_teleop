@@ -288,12 +288,13 @@ cd ~/pico_hand_arm_teleop/python_server
 - 离合键：左手柄 `X` 或左菜单键。
 - 默认只跟随平移，末端姿态保持离合激活瞬间不变。
 - `--track-rotation` 才会跟随手柄相对姿态。
-- PICO 平移默认 `--xyz-scale=1,-1,1`，因为实测 Y 方向反了。
+- 左手/右手基础坐标在 `core/pico_streamer.py` 里区分处理；A 左臂默认用左手 frame。
+- `--xyz-scale` 默认是 `1,1,1`，只作为现场临时微调/镜像覆盖。
 
-如果新电脑/新摆位发现 Y 又反了，临时切回：
+如果新电脑/新摆位发现某一轴还需要临时翻转：
 
 ```bash
---xyz-scale=1,1,1
+--xyz-scale=1,-1,1
 ```
 
 如果 X/Z 也要镜像，用等号传负数，避免 argparse 把 `-1` 当选项：

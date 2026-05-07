@@ -2,7 +2,7 @@
 
 该模块不直接操作硬件，只负责：
 
-1. 将 PICO 采集到的原始 pose（头显 + 右手柄）变换到机器人基座系下的齐次矩阵；
+1. 将 PICO 采集到的原始 pose（头显 + 手柄）变换到机器人/手臂控制系下的齐次矩阵；
 2. 根据离合按键实现"相对增量控制"：
    - 未激活时：机器人保持原位；
    - 激活瞬间（上升沿）：锁存当前手柄处理后位姿 ``T_vr_init`` 与机械臂末端真实位姿 ``T_ee_init``；
@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -53,7 +53,7 @@ WORKSPACE_LIMITS = {
 EMA_ALPHA_TRANSLATION = 0.25
 EMA_ALPHA_ROTATION = 0.20
 
-# PICO 轴系 -> 机器人轴系 的基向量旋转：
+# PICO 轴系 -> Marvin 基座系 的基向量变换：
 #
 # PICO (OpenXR 约定)：右手系，X 向右，Y 向上，Z 向后（指向用户）。
 # 机器人基座系（Marvin，已实测）：X 向前，Y 向上，Z 向操作者左侧。
@@ -79,6 +79,44 @@ R_ROBOT_FROM_PICO: np.ndarray = np.array(
     dtype=np.float64,
 )
 
+# arm-only 遥操还需要在“基座系”之上区分左右手/左右臂的控制 frame。
+#
+# 当前约定：
+#   - 右手 / 右臂沿用旧逻辑；
+#   - 左手 / A 左臂的平移已实机验证，在旧逻辑基础上需要 Y 轴镜像，才符合
+#     左臂坐标：+X 前、+Y 上、+Z 左。
+#
+# 旋转必须和同一个控制 frame 绑定，不能只在 tools 层对 xyz 乘符号。
+# 对旋转使用 B @ R @ B.T 做基变换；即使 B 是镜像矩阵，结果仍是合法旋转矩阵。
+LEFT_ARM_CONTROL_BASIS_FROM_LEGACY = np.diag([1.0, -1.0, 1.0])
+RIGHT_ARM_CONTROL_BASIS_FROM_LEGACY = np.eye(3, dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class PicoFrameProfile:
+    """PICO pose 进入机器人控制前的左右手/左右臂坐标配置。"""
+
+    side: str
+    position_basis: np.ndarray
+    rotation_basis: np.ndarray
+    description: str
+
+
+PICO_FRAME_PROFILES: dict[str, PicoFrameProfile] = {
+    "right": PicoFrameProfile(
+        side="right",
+        position_basis=RIGHT_ARM_CONTROL_BASIS_FROM_LEGACY,
+        rotation_basis=RIGHT_ARM_CONTROL_BASIS_FROM_LEGACY,
+        description="legacy right-controller/right-arm frame",
+    ),
+    "left": PicoFrameProfile(
+        side="left",
+        position_basis=LEFT_ARM_CONTROL_BASIS_FROM_LEGACY,
+        rotation_basis=LEFT_ARM_CONTROL_BASIS_FROM_LEGACY,
+        description="left-controller/A-arm frame: +X front, +Y up, +Z left",
+    ),
+}
+
 
 # ---------- 数学工具 ----------
 
@@ -94,6 +132,23 @@ def _pose7_to_matrix(pose: np.ndarray) -> np.ndarray:
     T[:3, :3] = _quat_to_matrix(pose[3], pose[4], pose[5], pose[6])
     T[:3, 3] = pose[:3]
     return T
+
+
+def _frame_profile(side: str | PicoFrameProfile) -> PicoFrameProfile:
+    if isinstance(side, PicoFrameProfile):
+        return side
+    try:
+        return PICO_FRAME_PROFILES[side]
+    except KeyError as exc:
+        raise ValueError("side 只能是 'left' 或 'right'") from exc
+
+
+def _apply_frame_profile(T: np.ndarray, profile: PicoFrameProfile) -> np.ndarray:
+    """把 legacy robot-frame pose 映射到指定手/臂的控制 frame。"""
+    T_out = T.copy()
+    T_out[:3, 3] = profile.position_basis @ T[:3, 3]
+    T_out[:3, :3] = profile.rotation_basis @ T[:3, :3] @ profile.rotation_basis.T
+    return T_out
 
 
 def _extract_yaw_rotation(R_mat: np.ndarray) -> np.ndarray:
@@ -117,21 +172,27 @@ def _extract_yaw_rotation(R_mat: np.ndarray) -> np.ndarray:
     )
 
 
-def pose7_to_robot_pos_rpy(pose7: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """把 PICO 系下的 7D pose ``[x, y, z, qx, qy, qz, qw]`` 转到机器人基座系，
+def pose7_to_robot_pos_rpy(
+    pose7: np.ndarray,
+    *,
+    side: str | PicoFrameProfile = "right",
+) -> tuple[np.ndarray, np.ndarray]:
+    """把 PICO 系下的 7D pose ``[x, y, z, qx, qy, qz, qw]`` 转到控制坐标系，
     返回 ``(xyz_m, rpy_deg)``。
 
-    - ``xyz_m``: 形状 ``(3,)``，机器人基座系下的平移，单位米
-    - ``rpy_deg``: 形状 ``(3,)``，机器人基座系下的 ``xyz`` 欧拉角，单位度
+    - ``xyz_m``: 形状 ``(3,)``，指定 ``side`` 控制系下的平移，单位米
+    - ``rpy_deg``: 形状 ``(3,)``，指定 ``side`` 控制系下的 ``xyz`` 欧拉角，单位度
 
     注意这里返回的是**绝对位姿**（纯基变换），没做"减头显原点 / 去偏航"那一套，
     因此适合做诊断/调试打印；业务侧的相对量请用 :func:`xr_pose_to_T`。
     """
     T_p = _pose7_to_matrix(pose7)
-    R_r = R_ROBOT_FROM_PICO @ T_p[:3, :3] @ R_ROBOT_FROM_PICO.T
-    p_r = R_ROBOT_FROM_PICO @ T_p[:3, 3]
-    rpy = R.from_matrix(R_r).as_euler("xyz", degrees=True)
-    return p_r, rpy
+    T_r = np.eye(4, dtype=np.float64)
+    T_r[:3, :3] = R_ROBOT_FROM_PICO @ T_p[:3, :3] @ R_ROBOT_FROM_PICO.T
+    T_r[:3, 3] = R_ROBOT_FROM_PICO @ T_p[:3, 3]
+    T_ctrl = _apply_frame_profile(T_r, _frame_profile(side))
+    rpy = R.from_matrix(T_ctrl[:3, :3]).as_euler("xyz", degrees=True)
+    return T_ctrl[:3, 3], rpy
 
 
 def T_to_pos_rpy(T: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -141,20 +202,28 @@ def T_to_pos_rpy(T: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rpy
 
 
-def xr_pose_to_T(headset_pose7: np.ndarray, ctrl_pose7: np.ndarray) -> np.ndarray:
-    """把头显 + 右手柄的 7D pose 变换为机器人基座系下的 4x4 齐次矩阵。
+def xr_pose_to_T(
+    headset_pose7: np.ndarray,
+    ctrl_pose7: np.ndarray,
+    *,
+    side: str | PicoFrameProfile = "right",
+) -> np.ndarray:
+    """把头显 + 手柄的 7D pose 变换为机器人/手臂控制系下的 4x4 齐次矩阵。
 
     步骤：
     1. 将两个 pose 从 "PICO 轴系 (Y-up, Z 向后)" 转换到 "机器人基座系
        (X 前 / Y 上 / Z 横，Y-up)"；
-    2. 计算右手柄相对于 headset 的相对位姿：
+    2. 计算手柄相对于 headset 的相对位姿：
            p_rel = p_ctrl - p_head
            R_rel = R_ctrl  （此处仅以 headset 位置作为参考原点，朝向处理放在下一步）
     3. 以 headset 的 Yaw 做"去偏航"（原地转身不动手也不该让末端乱飞）：
            p_out = R_inv_yaw @ p_rel
            R_out = R_inv_yaw @ R_rel
-    4. 将 (p_out, R_out) 拼成 4x4 齐次矩阵返回。
+    4. 将 (p_out, R_out) 拼成 4x4 齐次矩阵；
+    5. 根据 ``side`` 应用左右手/左右臂控制 frame 修正。
     """
+    profile = _frame_profile(side)
+
     # ---- 1. 把 pose 从 PICO 系 变到 机器人系 ----
     # 设 T_PR 为 "机器人系下的 4x4"，由 R_RP 把 PICO 基向量旋转过来：
     #   R_r = R_RP @ R_p @ R_RP^T   （基变换）
@@ -193,7 +262,7 @@ def xr_pose_to_T(headset_pose7: np.ndarray, ctrl_pose7: np.ndarray) -> np.ndarra
     T_out = np.eye(4, dtype=np.float64)
     T_out[:3, :3] = R_out
     T_out[:3, 3] = p_out
-    return T_out
+    return _apply_frame_profile(T_out, profile)
 
 
 # ---------- EMA 滤波器 ----------
@@ -396,8 +465,8 @@ class PicoStreamer:
 
         ctrl_pose, trigger, grip, button_pressed = self._pick_inputs(snap)
 
-        # 1. VR 侧处理位姿（去偏航 + 基变换）
-        T_vr_now = xr_pose_to_T(snap.headset_pose, ctrl_pose)
+        # 1. VR 侧处理位姿（去偏航 + 基变换 + 左/右手控制 frame）
+        T_vr_now = xr_pose_to_T(snap.headset_pose, ctrl_pose, side=self._side)
 
         # 2. 离合状态机
         self._update_clutch(button_pressed, T_vr_now, T_ee_now)

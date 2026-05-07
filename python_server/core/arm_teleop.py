@@ -3,7 +3,7 @@
 本模块只负责生成机械臂目标位姿，不处理 Revo2 手指目标。它和
 ``pico_streamer.PicoStreamer`` 的区别是：默认把平移和姿态解耦。
 
-- 平移：使用离合激活后 PICO 手柄在机器人基座系下的 xyz 增量；
+- 平移：使用离合激活后 PICO 手柄在对应手/臂控制系下的 xyz 增量；
 - 姿态：默认保持离合激活瞬间的末端姿态；
 - 可选：``track_rotation=True`` 时再跟随手柄相对旋转。
 """
@@ -132,7 +132,7 @@ class ArmTeleopController:
         ctrl_pose, trigger, grip, button_pressed = pick_controller_inputs(
             snap, self._side
         )
-        T_vr_now = xr_pose_to_T(snap.headset_pose, ctrl_pose)
+        T_vr_now = xr_pose_to_T(snap.headset_pose, ctrl_pose, side=self._side)
 
         self._update_clutch(button_pressed, T_vr_now, T_ee_now)
 

@@ -76,9 +76,6 @@ logger = logging.getLogger("test_xr_to_arm")
 # SDK demo 中常用的 A 臂演示构型；dummy 模式和无反馈兜底使用。
 DEFAULT_SEED_JOINTS_DEG = [21.8, -41.0, -4.74, -63.67, 10.15, 14.72, 7.68]
 
-# PICO 坐标到 Marvin 基座平移坐标的默认镜像；实测 Y 轴方向相反。
-DEFAULT_PICO_XYZ_SCALE = np.asarray([1.0, -1.0, 1.0], dtype=np.float64)
-
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -601,10 +598,10 @@ def main() -> None:
     ap.add_argument(
         "--xyz-scale",
         type=_parse_vec3,
-        default=DEFAULT_PICO_XYZ_SCALE.copy(),
+        default=np.ones(3, dtype=np.float64),
         help=(
-            "PICO 平移增量逐轴缩放/镜像，格式 sx,sy,sz。若含负数请用等号，"
-            "默认 1,-1,1；如 --xyz-scale=-1,1,1"
+            "PICO 平移增量逐轴缩放/镜像，格式 sx,sy,sz。左右手基础坐标已在 core 中处理；"
+            "若含负数请用等号，如 --xyz-scale=-1,1,1"
         ),
     )
     ap.add_argument(
