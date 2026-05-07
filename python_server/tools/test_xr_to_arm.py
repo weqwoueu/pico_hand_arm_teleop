@@ -636,7 +636,7 @@ def main() -> None:
         vel_ratio=args.vel,
         acc_ratio=args.acc,
         cart_k=[3000, 3000, 3000, 40, 40, 40, 20],
-        cart_d=[0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.0],
+        cart_d=[0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 1.0],
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
         ik_mode=args.ik_mode,
