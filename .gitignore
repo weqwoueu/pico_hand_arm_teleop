@@ -51,6 +51,9 @@ logs/
 .codex
 .codex/
 
+# ---- External dependencies installed by helper scripts ----
+external_dependencies/
+
 # ---- Native build byproducts ----
 *.o
 *.a

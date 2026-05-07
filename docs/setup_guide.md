@@ -63,39 +63,40 @@ git switch 手臂控制解耦
 git switch master
 ```
 
-## 2. 系统依赖
+## 2. Python 与 PICO pybind 环境
 
 推荐 Ubuntu 22.04 / 24.04，Python 必须用 3.10。`xrobotoolkit_sdk` 是 `cpython-310` ABI，用 3.11/3.12 会 import 失败。
 
 ```bash
 sudo apt update
-sudo apt install -y git curl build-essential python3.10 python3.10-venv
+sudo apt install -y git curl build-essential
 ```
 
-安装 uv：
+项目里有安装脚本，作用和 GR00T-WholeBodyControl 的 `install_pico.sh` 类似：自动准备 uv、Python 3.10、`python_server/.venv`，并把 XRoboToolkit pybind 装进 venv。
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
-uv --version
+cd ~/pico_hand_arm_teleop
+bash scripts/install_pico_env.sh
 ```
 
-创建 Python 环境：
+脚本默认把 pybind clone 到：
 
-```bash
-cd ~/pico_hand_arm_teleop/python_server
-uv venv --python 3.10
-uv sync
+```text
+external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/
 ```
+
+这个目录已被 `.gitignore` 忽略，不会被推到 GitHub。
 
 基础自检：
 
 ```bash
+cd ~/pico_hand_arm_teleop/python_server
 ./run.sh -m py_compile tools/test_xr_to_arm.py
 ./run.sh -c "import numpy, scipy; print('python deps ok')"
+./run.sh -c "import xrobotoolkit_sdk as xrt; print(xrt.__file__)"
 ```
 
-`python_server/.venv/` 不进 git，新电脑必须重新 `uv sync`。
+`python_server/.venv/` 不进 git，新电脑必须重新跑安装脚本或至少重新 `uv sync`。
 
 ## 3. XRoboToolkit 安装
 
@@ -156,44 +157,38 @@ ss -tlnp | grep -E '60061|63901'
 
 ### 3.2 准备 pybind `.so`
 
-这部分不在本仓库里，因为它是本机 venv 运行依赖。最稳做法：从旧电脑把整个 pybind 目录拷到新电脑，例如放在：
+正常情况下 **不用手动准备**，第 2 节的脚本已经做了：
 
-```text
-~/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/
+```bash
+bash scripts/install_pico_env.sh
 ```
 
-这个目录里至少要有：
+它会：
+
+- clone `XRoboToolkit-PC-Service-Pybind`
+- 安装 `cmake / pybind11 / setuptools`
+- 设置 `CMAKE_PREFIX_PATH`
+- `uv pip install --no-build-isolation -e ...`
+- 生成 `python_server/.env.xr` 作为 `XRT_LIB_DIR` 兜底
+
+如果脚本因为网络或官方仓库结构变化失败，再走手动兜底：从旧电脑拷贝已验证的 pybind 目录到新电脑这个位置：
+
+```text
+~/pico_hand_arm_teleop/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/
+```
+
+里面至少要有：
 
 ```text
 xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so
 lib/libPXREARobotSDK.so
 ```
 
-如果要从官方仓库重新拿，仓库地址是：
-
-```text
-https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind
-```
-
-但注意：如果官方仓库没有现成编译产物，优先从旧电脑拷贝已验证那份。
-
-把 Python pybind `.so` 复制进当前 venv：
+然后再让脚本安装到 venv：
 
 ```bash
-cd ~/pico_hand_arm_teleop/python_server
-
-export XRT_PYBIND_DIR="$HOME/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64"
-export XRT_LIB_DIR="$XRT_PYBIND_DIR/lib"
-
-PY_SITE="$(./.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
-cp "$XRT_PYBIND_DIR/xrobotoolkit_sdk.cpython-310-x86_64-linux-gnu.so" "$PY_SITE/"
-```
-
-建议把 `XRT_LIB_DIR` 写进 shell 配置：
-
-```bash
-echo 'export XRT_LIB_DIR="$HOME/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"' >> ~/.bashrc
-source ~/.bashrc
+cd ~/pico_hand_arm_teleop
+XRT_SKIP_PULL=1 bash scripts/install_pico_env.sh
 ```
 
 验证 import：
@@ -204,6 +199,12 @@ cd ~/pico_hand_arm_teleop/python_server
 ```
 
 如果这里报 `libPXREARobotSDK.so` 找不到，就是 `XRT_LIB_DIR` 没配对。
+
+临时修复：
+
+```bash
+source ~/pico_hand_arm_teleop/python_server/.env.xr
+```
 
 ### 3.3 验证 PICO 数据
 
@@ -474,9 +475,9 @@ cd pico_hand_arm_teleop
 git switch 臂角控制优化
 
 # Python 环境
+cd ~/pico_hand_arm_teleop
+bash scripts/install_pico_env.sh
 cd python_server
-uv venv --python 3.10
-uv sync
 
 # PICO 数据
 ./run.sh -m tools.test_xr_stream

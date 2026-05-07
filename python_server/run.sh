@@ -18,8 +18,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-DEFAULT_XRT_LIB_DIR="$HOME/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"
+REPO_XRT_LIB_DIR="$REPO_ROOT/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"
+LEGACY_XRT_LIB_DIR="$HOME/GR00T-WholeBodyControl/external_dependencies/XRoboToolkit-PC-Service-Pybind_X86_and_ARM64/lib"
+DEFAULT_XRT_LIB_DIR="$REPO_XRT_LIB_DIR"
+if [[ ! -d "$DEFAULT_XRT_LIB_DIR" && -d "$LEGACY_XRT_LIB_DIR" ]]; then
+    DEFAULT_XRT_LIB_DIR="$LEGACY_XRT_LIB_DIR"
+fi
 XRT_LIB_DIR="${XRT_LIB_DIR:-$DEFAULT_XRT_LIB_DIR}"
 
 if [[ ! -d "$XRT_LIB_DIR" ]]; then
