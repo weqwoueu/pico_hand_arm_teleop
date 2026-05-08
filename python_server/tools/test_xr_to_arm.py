@@ -17,8 +17,7 @@
         --amp-mm 5 --vel 5 --acc 5 --workspace-margin-m 0.05
 
     # ③ 真机 + PICO：A 臂是左臂，默认用左手柄 (X 或左菜单切离合)
-    ./run.sh -m tools.test_xr_to_arm --mode pico --controller left --hz 20 --vel 5 --acc 5 \
-        --workspace-margin-m 0.10
+    ./run.sh -m tools.test_xr_to_arm --mode pico --ik-mode nsp --controller left --hz 50 --vel 50 --acc 50         
 
     # ④ 想用右手柄驱动 A 臂（不推荐）：
     ./run.sh -m tools.test_xr_to_arm --mode pico --controller right ...
@@ -551,13 +550,13 @@ def main() -> None:
     ap.add_argument(
         "--max-step-mm",
         type=float,
-        default=4.0,
+        default=8.0,
         help="单拍最大平移目标变化，0 表示不限制",
     )
     ap.add_argument(
         "--max-rot-deg",
         type=float,
-        default=3.0,
+        default=6.0,
         help="单拍最大姿态目标变化，0 表示不限制",
     )
     ap.add_argument(
@@ -633,7 +632,7 @@ def main() -> None:
         vel_ratio=args.vel,
         acc_ratio=args.acc,
         cart_k=[5000, 5000, 5000, 80, 80, 80, 20],
-        cart_d=[0.5, 0.5, 0.5, 0.4, 0.4, 0.4, 1.0],
+        cart_d=[0.5, 0.35, 0.35, 0.3, 0.3, 0.3, 1.0],
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
         ik_mode=args.ik_mode,

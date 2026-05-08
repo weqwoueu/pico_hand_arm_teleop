@@ -44,14 +44,14 @@ logger = logging.getLogger(__name__)
 # 默认给一个「保守宽松」的 bounding box，能覆盖常见 FK 起点附近的小幅
 # 遥操（包含 z≈0.8m 的伸出姿态），真实台架请按现场可达空间收紧。
 WORKSPACE_LIMITS = {
-    "x": (-1.00, 1.00),
-    "y": (-1.00, 1.00),
-    "z": (-1.00, 1.00),
+    "x": (-1.50, 1.50),
+    "y": (-1.50, 1.50),
+    "z": (-1.50, 1.50),
 }
 
 # EMA 滤波系数（0~1，越大越灵敏；越小越平滑）
-EMA_ALPHA_TRANSLATION = 0.25
-EMA_ALPHA_ROTATION = 0.20
+EMA_ALPHA_TRANSLATION = 0.30
+EMA_ALPHA_ROTATION = 0.30
 
 # PICO 轴系 -> Marvin 基座系 的基向量变换：
 #
