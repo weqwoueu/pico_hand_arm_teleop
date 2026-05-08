@@ -148,8 +148,8 @@ class ArmTeleopController:
             T_cmd_raw[:3, 3] = self._clutch.T_ee_init[:3, 3] + cmd_delta
 
             if self._track_rotation:
-                R_delta = self._clutch.T_vr_init[:3, :3].T @ T_vr_now[:3, :3]
-                T_cmd_raw[:3, :3] = self._clutch.T_ee_init[:3, :3] @ R_delta
+                R_delta =T_vr_now[:3, :3] @ self._clutch.T_vr_init[:3, :3].T
+                T_cmd_raw[:3, :3] = R_delta @ self._clutch.T_ee_init[:3, :3]  
 
             T_cmd = clamp_workspace(
                 self._filter.apply(T_cmd_raw),
