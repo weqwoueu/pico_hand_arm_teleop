@@ -17,9 +17,13 @@
         --amp-mm 5 --vel 5 --acc 5 --workspace-margin-m 0.05
 
     # ③ 真机 + PICO：A 臂是左臂，默认用左手柄 (X 或左菜单切离合)
-    ./run.sh -m tools.test_xr_to_arm --mode pico --ik-mode nsp --controller left --hz 50 --vel 50 --acc 50         
+    ./run.sh -m tools.test_xr_to_arm --mode pico --ik-mode nsp --track-rotation --controller left --hz 50 --vel 50 --acc 50         
 
-    # ④ 想用右手柄驱动 A 臂（不推荐）：
+    # ④ 对比底层控制模式：默认 cart-impedance，也可试 joint-impedance / position
+    ./run.sh -m tools.test_xr_to_arm --mode pico --arm-control-mode joint-impedance \
+        --controller left --hz 20 --vel 5 --acc 5 --workspace-margin-m 0.05
+
+    # ⑤ 想用右手柄驱动 A 臂（不推荐）：
     ./run.sh -m tools.test_xr_to_arm --mode pico --controller right ...
 
 操作：
@@ -30,6 +34,8 @@
   - ``right`` → 右手柄 pose / trigger / grip，**A 键** 或 **右菜单键** 切换离合；
 - idle：只读 PICO 和臂状态，不下发；
 - active：默认只跟随手柄平移增量，末端姿态保持离合激活瞬间不变；
+- ``--arm-control-mode`` 只切换控制柜底层状态，上层 PICO -> TCP target -> IK -> joint cmd
+  链路保持一致，方便对比 cart-impedance / joint-impedance / position；
 - Ctrl+C：下使能 A 臂并释放 SDK 连接。
 
 安全建议：
@@ -142,8 +148,11 @@ class MarvinArmATeleopDriver:
         config_path: Path,
         vel_ratio: int,
         acc_ratio: int,
+        arm_control_mode: str,
         cart_k: list[float],
         cart_d: list[float],
+        joint_k: list[float],
+        joint_d: list[float],
         seed_joints_deg: list[float],
         ik_debug: bool = False,
         ik_mode: str = "normal",
@@ -158,8 +167,11 @@ class MarvinArmATeleopDriver:
         self._config_path = Path(config_path)
         self._vel_ratio = int(np.clip(vel_ratio, 1, 100))
         self._acc_ratio = int(np.clip(acc_ratio, 1, 100))
+        self._arm_control_mode = arm_control_mode
         self._cart_k = cart_k
         self._cart_d = cart_d
+        self._joint_k = joint_k
+        self._joint_d = joint_d
         self._last_q = list(seed_joints_deg)
         self._ik_debug = bool(ik_debug)
         self._ik_mode = ik_mode
@@ -198,7 +210,7 @@ class MarvinArmATeleopDriver:
         self._robot.local_log_switch("0")
         self._clear_error_a()
         self._verify_frame_serial()
-        self._enter_cart_impedance()
+        self._enter_control_mode()
 
         q = self._read_joint_deg()
         if q is not None:
@@ -206,7 +218,8 @@ class MarvinArmATeleopDriver:
         self._last_T_m = self._fk_m(self._last_q)
         self._init_ik_nsp(self._last_q)
         logger.info(
-            "A 臂已就绪：扭矩 + 笛卡尔阻抗，vel=%d%% acc=%d%%",
+            "A 臂已就绪：control=%s，vel=%d%% acc=%d%%",
+            self._arm_control_mode,
             self._vel_ratio,
             self._acc_ratio,
         )
@@ -299,6 +312,18 @@ class MarvinArmATeleopDriver:
         if motion_tag == 0:
             raise RuntimeError("未检测到 A 臂 frame_serial 刷新，请查防火墙/网线/控制柜连接")
 
+    def _enter_control_mode(self) -> None:
+        if self._arm_control_mode == "cart-impedance":
+            self._enter_cart_impedance()
+            return
+        if self._arm_control_mode == "joint-impedance":
+            self._enter_joint_impedance()
+            return
+        if self._arm_control_mode == "position":
+            self._enter_position_mode()
+            return
+        raise ValueError(f"未知 arm_control_mode: {self._arm_control_mode}")
+
     def _enter_cart_impedance(self) -> None:
         assert self._robot is not None
         self._robot.clear_set()
@@ -312,6 +337,36 @@ class MarvinArmATeleopDriver:
         self._robot.set_vel_acc(
             arm="A", velRatio=self._vel_ratio, AccRatio=self._acc_ratio
         )
+        self._robot.send_cmd()
+        time.sleep(0.35)
+
+    def _enter_joint_impedance(self) -> None:
+        assert self._robot is not None
+        self._robot.clear_set()
+        self._robot.set_state(arm="A", state=3)
+        self._robot.set_impedance_type(arm="A", type=1)
+        self._robot.set_vel_acc(
+            arm="A", velRatio=self._vel_ratio, AccRatio=self._acc_ratio
+        )
+        self._robot.send_cmd()
+        time.sleep(0.35)
+
+        self._robot.clear_set()
+        self._robot.set_joint_kd_params(arm="A", K=self._joint_k, D=self._joint_d)
+        self._robot.send_cmd()
+        time.sleep(0.25)
+
+    def _enter_position_mode(self) -> None:
+        assert self._robot is not None
+        self._robot.clear_set()
+        self._robot.set_vel_acc(
+            arm="A", velRatio=self._vel_ratio, AccRatio=self._acc_ratio
+        )
+        self._robot.send_cmd()
+        time.sleep(0.25)
+
+        self._robot.clear_set()
+        self._robot.set_state(arm="A", state=1)
         self._robot.send_cmd()
         time.sleep(0.35)
 
@@ -575,6 +630,15 @@ def main() -> None:
         ),
     )
     ap.add_argument(
+        "--arm-control-mode",
+        choices=("cart-impedance", "joint-impedance", "position"),
+        default="cart-impedance",
+        help=(
+            "A 臂底层控制柜模式。cart-impedance=当前默认笛卡尔阻抗；"
+            "joint-impedance=关节阻抗；position=位置模式。三者都沿用 PICO->TCP target->IK->关节命令链路。"
+        ),
+    )
+    ap.add_argument(
         "--controller",
         choices=("left", "right"),
         default="left",
@@ -631,8 +695,11 @@ def main() -> None:
         config_path=args.config if args.config is not None else _default_cfg(),
         vel_ratio=args.vel,
         acc_ratio=args.acc,
+        arm_control_mode=args.arm_control_mode,
         cart_k=[5000, 5000, 5000, 80, 80, 80, 20],
         cart_d=[0.5, 0.35, 0.35, 0.3, 0.3, 0.3, 1.0],
+        joint_k=[2, 2, 2, 1.6, 1, 1, 1],
+        joint_d=[0.3, 0.3, 0.3, 0.2, 0.2, 0.2, 0.2],
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
         ik_mode=args.ik_mode,
@@ -682,10 +749,12 @@ def main() -> None:
     if args.mode == "pico":
         logger.info(
             "开始 PICO -> A 臂 arm-only 遥操 @ %.1fHz；controller=%s，rotation=%s，"
-            "scale=%.2f xyz_scale=[%+.2f %+.2f %+.2f]，ik=%s，离合默认关闭，%s 切换离合，Ctrl+C 退出。",
+            "control=%s，scale=%.2f xyz_scale=[%+.2f %+.2f %+.2f]，ik=%s，"
+            "离合默认关闭，%s 切换离合，Ctrl+C 退出。",
             args.hz,
             args.controller,
             "follow" if args.track_rotation else "hold",
+            args.arm_control_mode,
             args.translation_scale,
             args.xyz_scale[0],
             args.xyz_scale[1],
@@ -695,11 +764,12 @@ def main() -> None:
         )
     else:
         logger.info(
-            "开始无 PICO scripted A 臂测试 @ %.1fHz: axis=%s amp=%.1fmm period=%.1fs ik=%s。Ctrl+C 退出。",
+            "开始无 PICO scripted A 臂测试 @ %.1fHz: axis=%s amp=%.1fmm period=%.1fs control=%s ik=%s。Ctrl+C 退出。",
             args.hz,
             args.axis,
             args.amp_mm,
             args.period,
+            args.arm_control_mode,
             args.ik_mode,
         )
 
