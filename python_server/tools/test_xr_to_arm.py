@@ -81,6 +81,51 @@ logger = logging.getLogger("test_xr_to_arm")
 # SDK demo 中常用的 A 臂演示构型；dummy 模式和无反馈兜底使用。
 DEFAULT_SEED_JOINTS_DEG = [21.8, -41.0, -4.74, -63.67, 10.15, 14.72, 7.68]
 
+# ---------------- 阻抗参数：现场主要改这里 ----------------
+#
+# 本脚本现在有两个阻抗模式：
+#   --arm-control-mode cart-impedance   坐标/笛卡尔阻抗
+#   --arm-control-mode joint-impedance  关节阻抗
+#
+# 两个模式的上层链路完全一样：PICO/scripted -> TCP target -> IK -> set_joint_cmd_pose。
+# 下面这些 K/D 只影响控制柜底层“跟目标时硬不硬、软不软、会不会抖”。
+#
+# 调参通用规律：
+#   1. K 越大：越硬、越跟手，但更容易抖/冲/碰撞力大。
+#   2. K 越小：越柔顺、安全余量更大，但会拖、末端/关节误差更明显。
+#   3. D 越大：阻尼越强、抖动更容易压住，但太大可能发闷、滞后。
+#   4. D 太小：响应更轻快，但容易晃、过冲。
+#   5. 每次只改一组参数，先 scripted 小幅度，再 PICO；首测配合低 vel/acc、max-step。
+#
+# SDK 文档给的范围/建议：
+#   关节阻抗:
+#     K[0:7]  关节刚度，C++ 文档建议 <= 2，非负。
+#     D[0:7]  关节阻尼，范围 0~1。
+#     官方 demo 参考: K=[2,2,2,1.6,1,1,1], D=[0.3,0.3,0.3,0.2,0.2,0.2,0.2]
+#   坐标阻抗:
+#     K[0:3]  平移刚度 xyz，Python 文档写“不超过 3000”。
+#     K[3:6]  旋转刚度 rxyz，Python 文档写“不超过 100”。
+#     K[6]    零空间刚度，Python 文档写“不超过 20”。
+#     D[0:7]  阻尼比例，范围 0~1。
+#     官方 demo 参考: K=[2000,2000,2000,40,40,40,20], D=[0.1,0.1,0.1,0.3,0.3,0.3,1]
+#
+# 推荐起步：
+#   - 新姿态/新工位/第一次试 joint-impedance，可以先降到：
+#       JOINT_IMPEDANCE_K = [1.0, 1.0, 1.0, 0.8, 0.6, 0.6, 0.6]
+#       JOINT_IMPEDANCE_D = [0.2, 0.2, 0.2, 0.15, 0.15, 0.15, 0.15]
+#   - 要更跟手、更硬一点，再逐步靠近当前默认 joint 值。
+#   - cart-impedance 当前默认保留现有实机手感，平移 K=5000 高于文档保守上限；
+#     如果出现抖动/冲击/新场地首测，先降到官方 demo 的
+#     [2000,2000,2000,40,40,40,20]。
+
+# 当前 cart-impedance 默认：保留现有遥操手感（偏硬、跟手）。
+CART_IMPEDANCE_K = [5000, 5000, 5000, 80, 80, 80, 20]
+CART_IMPEDANCE_D = [0.35, 0.35, 0.35, 0.3, 0.3, 0.3, 1.0]
+
+# 当前 joint-impedance 默认：来自官方 demo 的保守关节阻抗参考。
+JOINT_IMPEDANCE_K = [2, 2, 2, 1.6, 1, 1, 1]
+JOINT_IMPEDANCE_D = [0.3, 0.3, 0.3, 0.2, 0.2, 0.2, 0.2]
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -696,10 +741,10 @@ def main() -> None:
         vel_ratio=args.vel,
         acc_ratio=args.acc,
         arm_control_mode=args.arm_control_mode,
-        cart_k=[5000, 5000, 5000, 80, 80, 80, 20],
-        cart_d=[0.5, 0.35, 0.35, 0.3, 0.3, 0.3, 1.0],
-        joint_k=[2, 2, 2, 1.6, 1, 1, 1],
-        joint_d=[0.3, 0.3, 0.3, 0.2, 0.2, 0.2, 0.2],
+        cart_k=CART_IMPEDANCE_K,
+        cart_d=CART_IMPEDANCE_D,
+        joint_k=JOINT_IMPEDANCE_K,
+        joint_d=JOINT_IMPEDANCE_D,
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
         ik_mode=args.ik_mode,
