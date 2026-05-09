@@ -182,6 +182,31 @@ def _parse_vec3(raw: str) -> np.ndarray:
     return np.asarray(vals, dtype=np.float64)
 
 
+def _normalize_ik_mode(
+    parser: argparse.ArgumentParser, raw: list[str]
+) -> tuple[str, str]:
+    """解析 ``--ik-mode``。
+
+    支持：
+      - ``--ik-mode normal``
+      - ``--ik-mode nsp``         兼容旧逻辑：启动时固定参考平面
+      - ``--ik-mode nsp fixed``   显式启动时固定参考平面
+      - ``--ik-mode nsp last``    每帧用上一帧/当前反馈关节刷新参考平面
+      - ``--ik-mode nsp clutch``  每次离合激活时刷新并固定参考平面
+    """
+    parts = [str(x).strip().lower() for x in raw if str(x).strip()]
+    if parts == ["normal"]:
+        return "normal", "none"
+    if not parts or parts[0] != "nsp":
+        parser.error("--ik-mode 只能是 normal、nsp、nsp fixed、nsp last 或 nsp clutch")
+    if len(parts) == 1:
+        return "nsp", "fixed"
+    if len(parts) == 2 and parts[1] in {"fixed", "last", "clutch"}:
+        return "nsp", parts[1]
+    parser.error("--ik-mode nsp 后面只能接 fixed / last / clutch")
+    raise AssertionError("unreachable")
+
+
 class MarvinArmATeleopDriver:
     """基于 TJ SDK 的 A 臂最小遥操驱动。"""
 
@@ -201,6 +226,7 @@ class MarvinArmATeleopDriver:
         seed_joints_deg: list[float],
         ik_debug: bool = False,
         ik_mode: str = "normal",
+        ik_nsp_strategy: str = "fixed",
         ik_nsp_angle_deg: float = 0.0,
     ) -> None:
         _ensure_tj_sdk_path()
@@ -220,9 +246,11 @@ class MarvinArmATeleopDriver:
         self._last_q = list(seed_joints_deg)
         self._ik_debug = bool(ik_debug)
         self._ik_mode = ik_mode
+        self._ik_nsp_strategy = ik_nsp_strategy
         self._ik_nsp_angle_deg = float(ik_nsp_angle_deg)
         self._ik_zsp_para: Optional[list[float]] = None
         self._ik_zsp_seed: Optional[list[float]] = None
+        self._ik_zsp_warned_bad_ref = False
         self._ik_reject_count = 0
         self._joint_lmt_n: Optional[np.ndarray] = None
         self._joint_lmt_p: Optional[np.ndarray] = None
@@ -435,22 +463,66 @@ class MarvinArmATeleopDriver:
             raise RuntimeError("FK 失败")
         return _sdk_T_to_m(np.array(fk, dtype=np.float64))
 
+    @property
+    def ik_mode_label(self) -> str:
+        if self._ik_mode != "nsp":
+            return self._ik_mode
+        return f"{self._ik_mode}:{self._ik_nsp_strategy}"
+
+    @property
+    def last_joints_deg(self) -> list[float]:
+        return list(self._last_q)
+
+    def capture_clutch_nsp_reference(self, joints_deg: list[float]) -> None:
+        """离合激活瞬间刷新 NSP 参考平面。"""
+        if self._ik_mode != "nsp" or self._ik_nsp_strategy != "clutch":
+            return
+        ok = self._set_ik_zsp_from_joints(joints_deg, reason="离合激活")
+        if not ok:
+            logger.warning("NSP clutch 参考平面刷新失败，本次继续使用上一参考平面。")
+
     def _init_ik_nsp(self, seed_joints_deg: list[float]) -> None:
         if self._ik_mode != "nsp":
             return
+        if self._ik_nsp_strategy not in {"fixed", "last", "clutch"}:
+            raise ValueError(f"未知 NSP 策略: {self._ik_nsp_strategy}")
+        if self._ik_nsp_strategy == "last":
+            logger.info(
+                "IK NSP 已启用：strategy=last，每帧用上一帧/当前反馈关节刷新参考臂角平面，angle=%+.1fdeg",
+                self._ik_nsp_angle_deg,
+            )
+            return
+        ok = self._set_ik_zsp_from_joints(
+            seed_joints_deg,
+            reason="启动初始" if self._ik_nsp_strategy == "fixed" else "启动兜底",
+        )
+        if not ok:
+            logger.warning("NSP 初始参考平面不可用，已退回 normal IK")
+            self._ik_mode = "normal"
+
+    def _set_ik_zsp_from_joints(
+        self,
+        joints_deg: list[float],
+        *,
+        reason: str,
+        log_success: bool = True,
+    ) -> bool:
         assert self._kine is not None
-        if abs(float(seed_joints_deg[3])) < 0.5:
-            logger.warning("NSP 参考姿态 J4 太接近 0 度，已退回 normal IK")
-            self._ik_mode = "normal"
-            return
-        fk_nsp = self._kine.fk_nsp(joints=list(seed_joints_deg))
+        if abs(float(joints_deg[3])) < 0.5:
+            if log_success:
+                logger.warning(
+                    "NSP %s参考姿态 J4 太接近 0 度，无法提取臂角平面",
+                    reason,
+                )
+            return False
+        fk_nsp = self._kine.fk_nsp(joints=list(joints_deg))
         if not fk_nsp:
-            logger.warning("fk_nsp 失败：无法用当前初始姿态提取肘平面，已退回 normal IK")
-            self._ik_mode = "normal"
-            return
+            if log_success:
+                logger.warning("fk_nsp 失败：无法用%s参考姿态提取肘平面", reason)
+            return False
         _fk_mat, nsp_mat = fk_nsp
         nsp = np.asarray(nsp_mat, dtype=np.float64)
-        self._ik_zsp_seed = list(seed_joints_deg)
+        self._ik_zsp_seed = list(joints_deg)
         self._ik_zsp_para = [
             float(nsp[0, 0]),
             float(nsp[1, 0]),
@@ -459,15 +531,31 @@ class MarvinArmATeleopDriver:
             0.0,
             0.0,
         ]
-        logger.info(
-            "IK NSP 已启用：使用当前初始关节作为肘平面 seed=[%s] zsp_para=[%s] angle=%+.1fdeg",
-            self._fmt_vec(np.asarray(seed_joints_deg, dtype=np.float64)),
-            self._fmt_vec(np.asarray(self._ik_zsp_para[:3], dtype=np.float64)),
-            self._ik_nsp_angle_deg,
-        )
+        if log_success:
+            logger.info(
+                "IK NSP 参考平面已设置：strategy=%s reason=%s seed=[%s] zsp_para=[%s] angle=%+.1fdeg",
+                self._ik_nsp_strategy,
+                reason,
+                self._fmt_vec(np.asarray(joints_deg, dtype=np.float64)),
+                self._fmt_vec(np.asarray(self._ik_zsp_para[:3], dtype=np.float64)),
+                self._ik_nsp_angle_deg,
+            )
+        return True
 
     def _ik_q(self, T_target_sdk: np.ndarray, ref_joints_deg: list[float]) -> Optional[list[float]]:
         assert self._kine is not None
+        if self._ik_mode == "nsp" and self._ik_nsp_strategy == "last":
+            ok = self._set_ik_zsp_from_joints(
+                ref_joints_deg,
+                reason="上一帧",
+                log_success=False,
+            )
+            if ok:
+                self._ik_zsp_warned_bad_ref = False
+            elif not self._ik_zsp_warned_bad_ref:
+                logger.warning("NSP last 参考平面刷新失败，暂时沿用上一可用参考平面。")
+                self._ik_zsp_warned_bad_ref = True
+
         sp = self._FX_InvKineSolvePara()
         sp.set_input_ik_target_tcp(
             self._kine.mat4x4_to_mat1x16(_matrix4_to_rows(T_target_sdk))
@@ -719,9 +807,14 @@ def main() -> None:
     )
     ap.add_argument(
         "--ik-mode",
-        choices=("normal", "nsp"),
-        default="normal",
-        help="normal=普通 IK；nsp=启动时用当前关节 fk_nsp 提取肘平面，并用 ik_nsp 调整臂角",
+        nargs="+",
+        choices=("normal", "nsp", "fixed", "last", "clutch"),
+        default=["normal"],
+        help=(
+            "IK 模式：normal；nsp/fixed=启动时固定参考臂角平面；"
+            "nsp last=每帧用上一帧/当前反馈关节刷新参考平面；"
+            "nsp clutch=每次离合激活时刷新并固定参考平面"
+        ),
     )
     ap.add_argument(
         "--ik-nsp-angle",
@@ -733,6 +826,7 @@ def main() -> None:
 
     if args.hz <= 0:
         raise ValueError("--hz 必须 > 0")
+    ik_mode, ik_nsp_strategy = _normalize_ik_mode(ap, args.ik_mode)
 
     arm = MarvinArmATeleopDriver(
         dummy=args.dummy,
@@ -747,7 +841,8 @@ def main() -> None:
         joint_d=JOINT_IMPEDANCE_D,
         seed_joints_deg=args.seed_joints,
         ik_debug=args.ik_debug,
-        ik_mode=args.ik_mode,
+        ik_mode=ik_mode,
+        ik_nsp_strategy=ik_nsp_strategy,
         ik_nsp_angle_deg=args.ik_nsp_angle,
     )
 
@@ -804,7 +899,7 @@ def main() -> None:
             args.xyz_scale[0],
             args.xyz_scale[1],
             args.xyz_scale[2],
-            args.ik_mode,
+            arm.ik_mode_label,
             "X 或左菜单" if args.controller == "left" else "A 或右菜单",
         )
     else:
@@ -815,13 +910,14 @@ def main() -> None:
             args.amp_mm,
             args.period,
             args.arm_control_mode,
-            args.ik_mode,
+            arm.ik_mode_label,
         )
 
     dt = 1.0 / args.hz
     next_tick = time.perf_counter()
     tick = 0
     ok_cnt = 0
+    prev_active = False
     scripted_source = (
         ScriptedPoseSource(
             center_T=last_cmd_T,
@@ -857,6 +953,10 @@ def main() -> None:
                 T_target = cmd.T_target
                 trigger = cmd.trigger
                 grip = cmd.grip
+
+            if active and not prev_active:
+                arm.capture_clutch_nsp_reference(arm.last_joints_deg)
+            prev_active = active
 
             if active:
                 T_limited = limit_pose_step(
