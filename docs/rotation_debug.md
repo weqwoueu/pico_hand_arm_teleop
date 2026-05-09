@@ -1,6 +1,6 @@
 先改这里，别动平移。
 
-现在旋转在 [arm_teleop.py](/home/standard/pico_hand_arm_teleop/python_server/core/arm_teleop.py:150) 是这样：
+现在旋转在 [arm_core.py](/home/standard/pico_hand_arm_teleop/python_server/core/arm_core.py:276) 是这样：
 
 ```python
 if self._track_rotation:
@@ -44,4 +44,4 @@ rotation_basis=LEFT_ARM_CONTROL_BASIS_FROM_LEGACY,
 rotation_basis=np.diag([-1.0, 1.0, -1.0]),
 ```
 
-但我建议第一步只改 `arm_teleop.py` 这个乘法顺序，因为你现在这个症状更像“局部轴/世界轴用错了”，不是简单符号翻反。
+但我建议第一步只改 `arm_core.py` 这个乘法顺序，因为你现在这个症状更像“局部轴/世界轴用错了”，不是简单符号翻反。
