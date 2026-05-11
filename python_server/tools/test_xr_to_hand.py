@@ -1,12 +1,12 @@
 """真实 PICO 手柄 trigger/grip -> 真实 Revo2 灵巧手 端到端最小闭环脚本。
 
 这是 ``test_hand_mapping.py`` 的 "把模拟余弦波换成真 PICO 输入" 版本。
-其余管线（``compute_revo2_targets`` + ``to_sdk_positions`` + libstark 100Hz）保持一致。
+其余管线（``compute_revo2_targets`` + ``Revo2HandDriver`` + 100Hz）保持一致。
 
-验收动作：
+验收动作（默认右手柄，可用 ``--controller left`` 切到左手柄）：
 
-- 按 **右手柄 trigger** -> 食/中/无名/小 四指同步屈曲；
-- 按 **右手柄 grip**    -> 拇指屈伸（``Thumb Flex``，槽位 0）；
+- 按所选手柄 trigger -> 食/中/无名/小 四指同步屈曲；
+- 按所选手柄 grip    -> 拇指屈伸（``Thumb Flex``，槽位 0）；
 - 两个都按              -> 五指齐握；
 - 都松开                -> 手全伸开。
 - 拇指对掌 / 内外收（``Thumb Aux``，槽位 1）保持 ``THUMB_OPPOSITION_DEFAULT`` 的常量（不随手柄变化）。
@@ -19,17 +19,18 @@
 4. 环境变量已通过 ``python_server/run.sh`` 注入 ``LD_LIBRARY_PATH``。
 
 用法::
-
+    sudo chmod 666 /dev/ttyUSB0
     cd python_server
     ./run.sh -m tools.test_xr_to_hand
+    ./run.sh -m tools.test_xr_to_hand --controller left --hand-side left
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 
 # 兼容两种启动方式：
@@ -39,17 +40,10 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-try:
-    from bc_stark_sdk import main_mod as libstark  # type: ignore
-except Exception as exc:  # noqa: BLE001
-    print(f"[ERROR] 未安装 bc-stark-sdk: {exc}", file=sys.stderr)
-    print("    请在 python_server 下执行: uv add bc-stark-sdk colorlog", file=sys.stderr)
-    sys.exit(1)
-
+from core.hand_core import Revo2HandConfig, Revo2HandDriver
 from core.mapping_utils import (
     THUMB_OPPOSITION_DEFAULT,
     compute_revo2_targets,
-    to_sdk_positions,
 )
 from core.xr_client import XrClient
 
@@ -68,21 +62,35 @@ CTRL_DT = 1.0 / CTRL_HZ
 LOG_EVERY_N_TICKS = 20
 
 
-async def _auto_open_revo2():
-    """复刻 test_hand_mapping 的 Revo2 自动探测 + Modbus 打开。"""
-    logger.info("自动探测 Revo2 设备...")
-    protocol, port_name, baudrate, slave_id = await libstark.auto_detect_modbus_revo2(
-        None, True
+def _pick_hand_inputs(snap, side: str) -> tuple[float, float]:  # noqa: ANN001
+    if side == "left":
+        return float(snap.left_trigger), float(snap.left_grip)
+    if side == "right":
+        return float(snap.right_trigger), float(snap.right_grip)
+    raise ValueError("side 只能是 'left' 或 'right'")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="PICO 手柄 -> Revo2 单手验收")
+    ap.add_argument(
+        "--controller",
+        choices=("left", "right"),
+        default="right",
+        help="用于控制 Revo2 的 PICO 手柄；默认 right，保持之前验收逻辑",
     )
-    assert protocol == libstark.StarkProtocolType.Modbus, "本脚本仅支持 Modbus"
-    logger.info(
-        "探测成功: port=%s baudrate=%s slave_id=0x%x", port_name, baudrate, slave_id
+    ap.add_argument(
+        "--hand-side",
+        choices=("left", "right"),
+        default=None,
+        help="当前接入的 Revo2 是左手还是右手；默认跟随 --controller",
     )
-    client = await libstark.modbus_open(port_name, baudrate)
-    return client, slave_id
+    return ap
 
 
 async def main() -> None:
+    args = build_arg_parser().parse_args()
+    hand_side = args.hand_side or args.controller
+
     # 1) 先把 PICO 那头拉起来。SDK 未装时 XrClient 会降级成 dummy（全零），
     #    那种情况下不会崩，但手也不会动 —— 正好一眼就看出是上游没通。
     xr = XrClient()
@@ -90,17 +98,14 @@ async def main() -> None:
     logger.info("XrClient 已初始化。")
 
     # 2) 再开 Revo2（放后面是因为 PICO 初始化快、Revo2 探测可能等几秒）
-    revo2, slave_id = await _auto_open_revo2()
+    hand = Revo2HandDriver(Revo2HandConfig(side=hand_side))
     try:
-        info = await revo2.get_device_info(slave_id)
-        logger.info("Revo2 设备信息: %s", getattr(info, "description", info))
-
-        # 归一化模式：位置量程 0~1000 (0.1% 精度)
-        await revo2.set_finger_unit_mode(slave_id, libstark.FingerUnitMode.Normalized)
-        speeds = [1000] * 6
-
+        await hand.connect()
         logger.info(
-            "开始 PICO -> Revo2 实机遥操 @ %dHz。按 Ctrl+C 退出。", CTRL_HZ
+            "开始 PICO(%s) -> %s 实机遥操 @ %dHz。按 Ctrl+C 退出。",
+            args.controller,
+            hand.label,
+            CTRL_HZ,
         )
         logger.info(
             "验收：trigger=食+中+无名+小 四指屈曲 / grip=拇指屈伸(ThumbFlex) / 拇指内外收(ThumbAux) 固定 %.0f%%",
@@ -111,25 +116,22 @@ async def main() -> None:
         while True:
             # 真实 PICO 输入（snapshot 同步返回，几十 us 级，不阻塞 asyncio loop）
             snap = xr.snapshot()
-            trigger = float(snap.right_trigger)
-            grip = float(snap.right_grip)
+            trigger, grip = _pick_hand_inputs(snap, args.controller)
 
             targets = compute_revo2_targets(
                 trigger=trigger,
                 grip=grip,
                 thumb_opposition=THUMB_OPPOSITION_DEFAULT,
             )
-            positions = to_sdk_positions(targets)
-
-            await revo2.set_finger_positions_and_speeds(slave_id, positions, speeds)
+            positions = await hand.set_normalized_targets(targets)
 
             if tick % LOG_EVERY_N_TICKS == 0:
                 logger.info(
-                    "trig=%.2f grip=%.2f A=%s menu=%s -> sdk=%s",
+                    "%s trig=%.2f grip=%.2f -> %s sdk=%s",
+                    args.controller,
                     trigger,
                     grip,
-                    snap.button_a,
-                    snap.button_menu,
+                    hand.label,
                     positions,
                 )
 
@@ -138,7 +140,7 @@ async def main() -> None:
     finally:
         # 清理顺序：先断 Revo2（释放串口），再关 XrClient
         try:
-            libstark.modbus_close(revo2)
+            await hand.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Revo2 断开异常: %s", exc)
         try:

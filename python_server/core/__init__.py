@@ -1,6 +1,7 @@
 """核心控制模块包。"""
 
 from .arm_core import ArmTeleopCommand, ArmTeleopController, TianjiArmDriver
+from .hand_core import Revo2HandConfig, Revo2HandDriver
 from .hardware_node import TianjiRevoHardwareNode
 from .mapping_utils import Revo2FingerTargets, compute_revo2_targets
 from .pico_streamer import (
@@ -20,6 +21,8 @@ __all__ = [
     "PicoFrameProfile",
     "PicoStreamer",
     "Revo2FingerTargets",
+    "Revo2HandConfig",
+    "Revo2HandDriver",
     "TeleopCommand",
     "TianjiArmDriver",
     "TianjiRevoHardwareNode",

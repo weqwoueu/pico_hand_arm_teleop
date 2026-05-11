@@ -480,7 +480,7 @@ kill <pid>
 # 拉仓库
 git clone https://github.com/weqwoueu/pico_hand_arm_teleop.git
 cd pico_hand_arm_teleop
-git switch 臂角控制优化
+git switch mian
 
 # PC Service（须先于下面 install_pico_env.sh）
 cd ~/Downloads
@@ -496,6 +496,12 @@ cd python_server
 
 # PICO 数据
 ./run.sh -m tools.test_xr_stream
+
+#天机常用脚本
+cd third_party/TJ_FX_ROBOT_CONTRL_SDK/DEMO_PYTHON/
+python3 showcase_servo_error.py #清错测链接
+python3 showcase_clear_error_arm_A.py #强力清错，还清不掉就重启
+python3 showcase_position.py #进初始位置
 
 # A 臂 scripted
 export MARVIN_IP=192.168.71.190
