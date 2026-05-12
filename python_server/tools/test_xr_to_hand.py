@@ -21,8 +21,8 @@
 用法::
     sudo chmod 666 /dev/ttyUSB0
     cd python_server
-    ./run.sh -m tools.test_xr_to_hand
-    ./run.sh -m tools.test_xr_to_hand --controller left --hand-side left
+    ./run.sh -m tools.test_xr_to_hand --hand-port /dev/ttyUSB0
+    ./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0
 """
 
 from __future__ import annotations
@@ -84,6 +84,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="当前接入的 Revo2 是左手还是右手；默认跟随 --controller",
     )
+    ap.add_argument("--hand-port", default=None, help="Revo2 飞线 USB-RS485 串口，例如 /dev/ttyUSB0；默认自动探测")
+    ap.add_argument("--hand-baudrate", type=int, default=None, help="Revo2 波特率；指定串口时默认 460800")
+    ap.add_argument("--hand-slave-id", type=lambda raw: int(raw, 0), default=None, help="Revo2 从站号；指定串口时默认 0x7e")
     return ap
 
 
@@ -98,7 +101,14 @@ async def main() -> None:
     logger.info("XrClient 已初始化。")
 
     # 2) 再开 Revo2（放后面是因为 PICO 初始化快、Revo2 探测可能等几秒）
-    hand = Revo2HandDriver(Revo2HandConfig(side=hand_side))
+    hand = Revo2HandDriver(
+        Revo2HandConfig(
+            side=hand_side,
+            port=args.hand_port,
+            baudrate=args.hand_baudrate,
+            slave_id=args.hand_slave_id,
+        )
+    )
     try:
         await hand.connect()
         logger.info(

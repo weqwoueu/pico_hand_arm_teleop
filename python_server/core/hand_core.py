@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_REVO2_SPEED = 1000
+DEFAULT_REVO2_BAUDRATE = 460800
+DEFAULT_REVO2_SLAVE_ID = 0x7E
 
 
 @dataclass
@@ -77,8 +79,8 @@ class Revo2HandDriver:
                 raise RuntimeError(f"不支持的 Revo2 协议: {protocol}")
         else:
             port_name = self.config.port
-            baudrate = self.config.baudrate or 460800
-            slave_id = self.config.slave_id or 0x7F
+            baudrate = self.config.baudrate or DEFAULT_REVO2_BAUDRATE
+            slave_id = self.config.slave_id or DEFAULT_REVO2_SLAVE_ID
 
         logger.info(
             "打开 %s: port=%s baudrate=%s slave_id=0x%x",
@@ -164,6 +166,8 @@ class Revo2HandDriver:
 
 __all__ = [
     "DEFAULT_REVO2_SPEED",
+    "DEFAULT_REVO2_BAUDRATE",
+    "DEFAULT_REVO2_SLAVE_ID",
     "Revo2HandConfig",
     "Revo2HandDriver",
 ]

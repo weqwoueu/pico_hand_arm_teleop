@@ -29,6 +29,9 @@ from .mapping_utils import Revo2FingerTargets, to_sdk_positions
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_REVO2_BAUDRATE = 460800
+DEFAULT_REVO2_SLAVE_ID = 0x7E
+
 
 # ---------- 机械臂 ----------
 
@@ -252,8 +255,8 @@ class Revo2HandDriver:
                 )
             else:
                 port_name = self._config.port
-                baudrate = self._config.baudrate or 460800
-                slave_id = self._config.slave_id or 0x7F
+                baudrate = self._config.baudrate or DEFAULT_REVO2_BAUDRATE
+                slave_id = self._config.slave_id or DEFAULT_REVO2_SLAVE_ID
 
             logger.info(
                 "打开 Revo2: port=%s baudrate=%s slave_id=0x%x",

@@ -14,6 +14,7 @@
     sudo chmod 666 /dev/ttyUSB0
     export MARVIN_IP=192.168.71.190
     ./run.sh -m tools.test_xr_to_robot --ik-mode nsp clutch \
+        --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e \
         --track-rotation --hz 50 --vel 50 --acc 50 --workspace-margin-m 0.05
 
 Ctrl+C：下使能 A 臂、关闭 Revo2 串口、释放 XR SDK。
@@ -161,9 +162,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="left",
         help="当前接入的 Revo2 是左手还是右手，默认 left",
     )
-    ap.add_argument("--hand-port", default=None, help="Revo2 串口；默认自动探测")
+    ap.add_argument("--hand-port", default=None, help="Revo2 飞线 USB-RS485 串口，例如 /dev/ttyUSB0；默认自动探测")
     ap.add_argument("--hand-baudrate", type=int, default=None, help="Revo2 波特率；指定串口时默认 460800")
-    ap.add_argument("--hand-slave-id", type=_parse_int_auto, default=None, help="Revo2 从站号，支持 0x7f 写法")
+    ap.add_argument("--hand-slave-id", type=_parse_int_auto, default=None, help="Revo2 从站号；指定串口时默认 0x7e")
     ap.add_argument("--hand-speed", type=int, default=1000, help="Revo2 下发速度 0~1000，默认 1000")
     ap.add_argument(
         "--hand-release-on-close",

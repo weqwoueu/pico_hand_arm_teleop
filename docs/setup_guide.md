@@ -333,7 +333,7 @@ NSP 在这里按 **Null-Space Plane** 理解，也就是零空间臂角平面。
 
 ## 6. Revo2 手
 
-当前先测臂，手后面接回来。新电脑准备 Revo2 时：
+当前主线采用 Revo2 飞线直连电脑，不再走天机末端 8Pin 485 透传。新电脑准备 Revo2 时：
 
 ```bash
 cd ~/pico_hand_arm_teleop/python_server
@@ -354,6 +354,14 @@ sudo usermod -aG dialout $USER
 # 重新登录后生效
 ```
 
+已验证 Revo2 参数：
+
+```text
+port=/dev/ttyUSB*
+baudrate=460800
+slave_id=0x7E
+```
+
 纯手开合测试：
 
 ```bash
@@ -363,10 +371,15 @@ sudo usermod -aG dialout $USER
 PICO -> Revo2 测试：
 
 ```bash
-./run.sh -m tools.test_xr_to_hand
+./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
 ```
 
-注意：`test_xr_to_hand.py` 当前不是 argparse 脚本，不要用 `--help`，它会真的开始连 PICO 和 Revo2。
+整机左臂 + 左手测试：
+
+```bash
+export MARVIN_IP=192.168.71.190
+./run.sh -m tools.test_xr_to_robot --arm-controller left --hand-controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e --ik-mode nsp clutch --hz 50 --vel 50 --acc 50 --workspace-margin-m 0.05
+```
 
 ## 7. 后续整体遥操与采数据
 
@@ -512,5 +525,5 @@ export MARVIN_IP=192.168.71.190
 
 # Revo2 手
 ./run.sh -m tools.test_hand_basic
-./run.sh -m tools.test_xr_to_hand
+./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
 ```
