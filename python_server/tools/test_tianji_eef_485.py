@@ -16,8 +16,8 @@
 用法（在 python_server 目录）::
 
     ./run.sh -m tools.test_tianji_eef_485
-    ./run.sh -m tools.test_tianji_eef_485 --arm A --channels 2 3 --slaves 0x7f 1
-    ./run.sh -m tools.test_tianji_eef_485 --ip 192.168.71.190 --channel 2 --slave 0x7f
+    ./run.sh -m tools.test_tianji_eef_485 --arm A --channels 2 3 --slaves 0x7e 0x7f 1
+    ./run.sh -m tools.test_tianji_eef_485 --ip 192.168.71.190 --channel 2 --slave 0x7e
 
 默认只发 Modbus RTU 读请求，读请求本身不会改变 Revo2 状态。
 """
@@ -271,8 +271,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--slaves",
         type=_parse_int_auto,
         nargs="+",
-        default=[0x7F, 0x01],
-        help="要扫描的 Modbus 从站号，默认 0x7f 1",
+        default=[0x7E, 0x7F, 0x01],
+        help="要扫描的 Modbus 从站号，默认 0x7e 0x7f 1",
     )
     ap.add_argument("--slave", type=_parse_int_auto, default=None, help="只测一个从站号")
     ap.add_argument(
@@ -406,7 +406,7 @@ def main() -> None:
             logger.info("所有探测均无回包。优先按以下顺序查：")
             logger.info("1. 8Pin 通道是否接对：NO.3/4 对 channel=2，NO.5/6 对 channel=3")
             logger.info("2. 485 A/B 是否反了：交换 A/B 再跑一次")
-            logger.info("3. Revo2 从站号是否不是 0x7F/0x01：用 --slaves 扩大扫描")
+            logger.info("3. Revo2 从站号是否不是 0x7E/0x7F/0x01：用 --slaves 扩大扫描")
             logger.info("4. 末端 COM 波特率/校验位/停止位与 Revo2 不一致：这是最像的波特率问题")
             logger.info("5. 末端 485 通道未启用或需要控制器侧配置：问天机 COM1/COM2 串口参数/启用方式")
     finally:
