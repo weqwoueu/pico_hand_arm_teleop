@@ -3,7 +3,15 @@
 from .arm_core import ArmTeleopCommand, ArmTeleopController, TianjiArmDriver
 from .hand_core import Revo2HandConfig, Revo2HandDriver
 from .hardware_node import TianjiRevoHardwareNode
-from .mapping_utils import Revo2FingerTargets, compute_revo2_targets
+from .mapping_utils import (
+    HAND_MODE_GRIPPER,
+    HAND_MODE_TWO_CHANNEL,
+    HAND_MODES,
+    HandControlSample,
+    Revo2FingerTargets,
+    build_hand_control_sample,
+    compute_revo2_targets,
+)
 from .pico_streamer import (
     PICO_FRAME_PROFILES,
     PicoFrameProfile,
@@ -17,6 +25,10 @@ __all__ = [
     "ArmTeleopCommand",
     "ArmTeleopController",
     "ControllerSnapshot",
+    "HAND_MODE_GRIPPER",
+    "HAND_MODE_TWO_CHANNEL",
+    "HAND_MODES",
+    "HandControlSample",
     "PICO_FRAME_PROFILES",
     "PicoFrameProfile",
     "PicoStreamer",
@@ -27,6 +39,7 @@ __all__ = [
     "TianjiArmDriver",
     "TianjiRevoHardwareNode",
     "XrClient",
+    "build_hand_control_sample",
     "compute_revo2_targets",
     "xr_pose_to_T",
 ]

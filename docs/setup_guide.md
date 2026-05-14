@@ -359,7 +359,8 @@ sudo usermod -aG dialout $USER
 ```text
 port=/dev/ttyUSB*
 baudrate=460800
-slave_id=0x7E
+left_slave_id=0x7E
+right_slave_id=0x7F
 ```
 
 纯手开合测试：
@@ -371,14 +372,14 @@ slave_id=0x7E
 PICO -> Revo2 测试：
 
 ```bash
-./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
+./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-mode gripper --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
 ```
 
 整机左臂 + 左手测试：
 
 ```bash
 export MARVIN_IP=192.168.71.190
-./run.sh -m tools.test_xr_to_robot --arm-controller left --hand-controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e --ik-mode nsp clutch --hz 50 --vel 50 --acc 50 --workspace-margin-m 0.05
+./run.sh -m tools.test_xr_to_robot --arm-controller left --hand-controller left --hand-side left --hand-mode gripper --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e --ik-mode nsp clutch --hz 50 --vel 50 --acc 50 --workspace-margin-m 0.05
 ```
 
 ## 7. 后续整体遥操与采数据
@@ -525,5 +526,5 @@ export MARVIN_IP=192.168.71.190
 
 # Revo2 手
 ./run.sh -m tools.test_hand_basic
-./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
+./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-mode gripper --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e
 ```

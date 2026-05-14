@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -53,6 +54,11 @@ TUI_UPDATE_EVERY_N_TICKS = 5
 # 抓取类任务通常用 0.7~0.9。
 THUMB_OPPOSITION: float = 1.00
 
+# 与 ``PicoStreamer(..., side=...)``、``xr_pose_to_T(..., side=...)`` 对齐。
+# 天机 A 臂在左侧时常用左手柄：``export TELEOP_CONTROLLER_SIDE=left``。
+TELEOP_CONTROLLER_SIDE: str = os.environ.get("TELEOP_CONTROLLER_SIDE", "right").strip().lower()
+if TELEOP_CONTROLLER_SIDE not in {"left", "right"}:
+    raise ValueError("环境变量 TELEOP_CONTROLLER_SIDE 只能为 left 或 right")
 
 # 全局 console，供 logging handler 和 Live 共用
 _CONSOLE = Console()
@@ -99,12 +105,15 @@ def build_status_panel(
     active: bool,
     sdk_positions: Optional[list] = None,
     T_target: Optional["np.ndarray"] = None,
+    *,
+    teleop_side: str = "right",
 ) -> Panel:
     table = Table.grid(padding=(0, 2), expand=False)
     table.add_column(justify="right", style="cyan", no_wrap=True)
     table.add_column(justify="left")
 
     table.add_row("tick", f"{tick}  ({LOOP_HZ} Hz)")
+    table.add_row("teleop side", teleop_side)
 
     if snap is None:
         table.add_row("status", Text("等待 PICO 数据 …", style="yellow"))
@@ -118,27 +127,35 @@ def build_status_panel(
     )
     table.add_row("clutch", clutch_txt)
 
-    # 按键
+    # 按键（与 teleop_side 一致：右手 A/Menu，左手 X/左 Menu）
     btn_row = Text()
-    btn_row.append_text(_bool_tag(snap.button_a))
-    btn_row.append(" A   ")
-    btn_row.append_text(_bool_tag(snap.button_menu))
-    btn_row.append(" Menu")
+    if teleop_side == "right":
+        btn_row.append_text(_bool_tag(snap.button_a))
+        btn_row.append(" A   ")
+        btn_row.append_text(_bool_tag(snap.button_menu))
+        btn_row.append(" Menu")
+    else:
+        btn_row.append_text(_bool_tag(snap.button_x))
+        btn_row.append(" X   ")
+        btn_row.append_text(_bool_tag(snap.left_button_menu))
+        btn_row.append(" L.Menu")
     table.add_row("buttons", btn_row)
 
-    # trigger / grip
+    trig = snap.right_trigger if teleop_side == "right" else snap.left_trigger
+    grip = snap.right_grip if teleop_side == "right" else snap.left_grip
     trig_txt = Text()
-    trig_txt.append_text(_bar(snap.right_trigger))
-    trig_txt.append(f"  {snap.right_trigger:.2f}")
+    trig_txt.append_text(_bar(trig))
+    trig_txt.append(f"  {trig:.2f}")
     grip_txt = Text()
-    grip_txt.append_text(_bar(snap.right_grip))
-    grip_txt.append(f"  {snap.right_grip:.2f}")
+    grip_txt.append_text(_bar(grip))
+    grip_txt.append(f"  {grip:.2f}")
     table.add_row("trigger", trig_txt)
     table.add_row("grip", grip_txt)
 
-    # 头显 / 手柄位姿（机器人基座系）
+    # 头显 / 手柄位姿（机器人基座系；手柄须与 PicoStreamer.side 一致）
+    ctrl_pose = snap.right_pose if teleop_side == "right" else snap.left_pose
     h_xyz, h_rpy = pose7_to_robot_pos_rpy(snap.headset_pose)
-    c_xyz, c_rpy = pose7_to_robot_pos_rpy(snap.right_pose)
+    c_xyz, c_rpy = pose7_to_robot_pos_rpy(ctrl_pose, side=teleop_side)
     table.add_row(
         "head xyz (m)",
         f"[ {h_xyz[0]:+6.3f}  {h_xyz[1]:+6.3f}  {h_xyz[2]:+6.3f} ]",
@@ -202,11 +219,17 @@ def main() -> None:
 
     xr = XrClient()
     hw = TianjiRevoHardwareNode()
-    streamer = PicoStreamer(xr, thumb_opposition=THUMB_OPPOSITION)
+    streamer = PicoStreamer(
+        xr, thumb_opposition=THUMB_OPPOSITION, side=TELEOP_CONTROLLER_SIDE
+    )
 
     xr.init()
     hw.connect()
-    log.info("遥操作主循环启动 (%.0f Hz)。按 Ctrl+C 退出。", LOOP_HZ)
+    log.info(
+        "遥操作主循环启动 (%.0f Hz)，手柄侧=%s（可用 TELEOP_CONTROLLER_SIDE=left|right 覆盖）。按 Ctrl+C 退出。",
+        LOOP_HZ,
+        TELEOP_CONTROLLER_SIDE,
+    )
 
     stop_flag = {"stop": False}
 
@@ -222,7 +245,9 @@ def main() -> None:
 
     try:
         with Live(
-            build_status_panel(tick, None, False, None),
+            build_status_panel(
+                tick, None, False, None, teleop_side=TELEOP_CONTROLLER_SIDE
+            ),
             console=_CONSOLE,
             refresh_per_second=TUI_REFRESH_HZ,
             transient=False,
@@ -245,6 +270,7 @@ def main() -> None:
                             cmd.active,
                             to_sdk_positions(cmd.fingers),
                             T_target=cmd.T_target,
+                            teleop_side=TELEOP_CONTROLLER_SIDE,
                         )
                     )
 

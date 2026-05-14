@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REVO2_SPEED = 1000
 DEFAULT_REVO2_BAUDRATE = 460800
-DEFAULT_REVO2_SLAVE_ID = 0x7E
+DEFAULT_REVO2_LEFT_SLAVE_ID = 0x7E
+DEFAULT_REVO2_RIGHT_SLAVE_ID = 0x7F
 
 
 @dataclass
@@ -79,8 +80,11 @@ class Revo2HandDriver:
                 raise RuntimeError(f"不支持的 Revo2 协议: {protocol}")
         else:
             port_name = self.config.port
-            baudrate = self.config.baudrate or DEFAULT_REVO2_BAUDRATE
-            slave_id = self.config.slave_id or DEFAULT_REVO2_SLAVE_ID
+            baudrate = self._coerce_baudrate(
+                libstark,
+                self.config.baudrate or DEFAULT_REVO2_BAUDRATE,
+            )
+            slave_id = self.config.slave_id or self._default_slave_id_for_side(self.config.side)
 
         logger.info(
             "打开 %s: port=%s baudrate=%s slave_id=0x%x",
@@ -163,11 +167,42 @@ class Revo2HandDriver:
             ) from exc
         return libstark
 
+    @staticmethod
+    def _default_slave_id_for_side(side: str) -> int:
+        return DEFAULT_REVO2_LEFT_SLAVE_ID if side == "left" else DEFAULT_REVO2_RIGHT_SLAVE_ID
+
+    @staticmethod
+    def _coerce_baudrate(libstark: Any, baudrate: Any) -> Any:
+        """Convert a CLI integer baudrate to the SDK Baudrate enum."""
+        if not isinstance(baudrate, int):
+            return baudrate
+        baudrate_cls = libstark.Baudrate
+        if hasattr(baudrate_cls, "from_int"):
+            try:
+                return baudrate_cls.from_int(baudrate)
+            except Exception:  # noqa: BLE001
+                pass
+        baudrate_map = {
+            19200: baudrate_cls.Baud19200,
+            57600: baudrate_cls.Baud57600,
+            115200: baudrate_cls.Baud115200,
+            460800: baudrate_cls.Baud460800,
+            1000000: baudrate_cls.Baud1Mbps,
+            2000000: baudrate_cls.Baud2Mbps,
+            5000000: baudrate_cls.Baud5Mbps,
+        }
+        try:
+            return baudrate_map[baudrate]
+        except KeyError as exc:
+            supported = ", ".join(str(k) for k in sorted(baudrate_map))
+            raise ValueError(f"不支持的 Revo2 baudrate={baudrate}，支持: {supported}") from exc
+
 
 __all__ = [
     "DEFAULT_REVO2_SPEED",
     "DEFAULT_REVO2_BAUDRATE",
-    "DEFAULT_REVO2_SLAVE_ID",
+    "DEFAULT_REVO2_LEFT_SLAVE_ID",
+    "DEFAULT_REVO2_RIGHT_SLAVE_ID",
     "Revo2HandConfig",
     "Revo2HandDriver",
 ]

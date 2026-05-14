@@ -8,7 +8,8 @@
 ```text
 port: /dev/ttyUSB*
 baudrate: 460800
-slave_id: 0x7E
+left slave_id: 0x7E
+right slave_id: 0x7F
 ```
 
 临时打开串口权限：
@@ -45,9 +46,46 @@ PICO 控 Revo2，左手柄控左手：
 ./run.sh -m tools.test_xr_to_hand \
   --controller left \
   --hand-side left \
+  --hand-mode gripper \
   --hand-port /dev/ttyUSB0 \
   --hand-baudrate 460800 \
   --hand-slave-id 0x7e
+```
+
+`--hand-mode gripper` 是当前采数据主线：把 Revo2 当一维夹爪，`trigger` 连续值
+`0~1` 对应全开到全抓。脚本每帧会生成可记录的手部数据：
+
+```text
+side
+mode
+raw_trigger
+raw_grip
+grasp_scalar
+hand_cmd_6d
+```
+
+如果要回到之前的两通道手控：
+
+```bash
+./run.sh -m tools.test_xr_to_hand \
+  --controller left \
+  --hand-side left \
+  --hand-mode two-channel \
+  --hand-port /dev/ttyUSB0 \
+  --hand-baudrate 460800 \
+  --hand-slave-id 0x7e
+```
+
+右手测试时：
+
+```bash
+./run.sh -m tools.test_xr_to_hand \
+  --controller right \
+  --hand-side right \
+  --hand-mode gripper \
+  --hand-port /dev/ttyUSB0 \
+  --hand-baudrate 460800 \
+  --hand-slave-id 0x7f
 ```
 
 PICO 控 A 臂 + 左 Revo2：
@@ -58,6 +96,7 @@ export MARVIN_IP=192.168.71.190
   --arm-controller left \
   --hand-controller left \
   --hand-side left \
+  --hand-mode gripper \
   --hand-port /dev/ttyUSB0 \
   --hand-baudrate 460800 \
   --hand-slave-id 0x7e \

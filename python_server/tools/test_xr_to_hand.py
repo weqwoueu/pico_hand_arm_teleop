@@ -1,14 +1,12 @@
 """真实 PICO 手柄 trigger/grip -> 真实 Revo2 灵巧手 端到端最小闭环脚本。
 
 这是 ``test_hand_mapping.py`` 的 "把模拟余弦波换成真 PICO 输入" 版本。
-其余管线（``compute_revo2_targets`` + ``Revo2HandDriver`` + 100Hz）保持一致。
+其余管线（``build_hand_control_sample`` + ``Revo2HandDriver`` + 100Hz）保持一致。
 
 验收动作（默认右手柄，可用 ``--controller left`` 切到左手柄）：
 
-- 按所选手柄 trigger -> 食/中/无名/小 四指同步屈曲；
-- 按所选手柄 grip    -> 拇指屈伸（``Thumb Flex``，槽位 0）；
-- 两个都按              -> 五指齐握；
-- 都松开                -> 手全伸开。
+- 默认 ``--hand-mode gripper``：按所选手柄 trigger -> 五指同步抓握；
+- 可切 ``--hand-mode two-channel``：trigger 控四指，grip 控拇指屈伸；
 - 拇指对掌 / 内外收（``Thumb Aux``，槽位 1）保持 ``THUMB_OPPOSITION_DEFAULT`` 的常量（不随手柄变化）。
 
 前置：
@@ -22,7 +20,7 @@
     sudo chmod 666 /dev/ttyUSB0
     cd python_server
     ./run.sh -m tools.test_xr_to_hand --hand-port /dev/ttyUSB0
-    ./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0
+    ./run.sh -m tools.test_xr_to_hand --controller left --hand-side left --hand-port /dev/ttyUSB0 --hand-mode gripper
 """
 
 from __future__ import annotations
@@ -42,8 +40,10 @@ if str(_PKG_ROOT) not in sys.path:
 
 from core.hand_core import Revo2HandConfig, Revo2HandDriver
 from core.mapping_utils import (
+    HAND_MODES,
     THUMB_OPPOSITION_DEFAULT,
-    compute_revo2_targets,
+    build_hand_control_sample,
+    normalize_hand_mode,
 )
 from core.xr_client import XrClient
 
@@ -86,13 +86,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--hand-port", default=None, help="Revo2 飞线 USB-RS485 串口，例如 /dev/ttyUSB0；默认自动探测")
     ap.add_argument("--hand-baudrate", type=int, default=None, help="Revo2 波特率；指定串口时默认 460800")
-    ap.add_argument("--hand-slave-id", type=lambda raw: int(raw, 0), default=None, help="Revo2 从站号；指定串口时默认 0x7e")
+    ap.add_argument("--hand-slave-id", type=lambda raw: int(raw, 0), default=None, help="Revo2 从站号；指定串口时默认 left=0x7e, right=0x7f")
+    ap.add_argument(
+        "--hand-mode",
+        choices=HAND_MODES,
+        default="gripper",
+        help="手部控制模式：gripper=trigger 一维夹爪；two-channel=trigger 四指 + grip 拇指",
+    )
+    ap.add_argument(
+        "--thumb-opposition",
+        type=float,
+        default=THUMB_OPPOSITION_DEFAULT,
+        help="拇指对掌/内外收归一化固定值，[0,1]；1.0 对应当前 ThumbAux 标定上限",
+    )
     return ap
 
 
 async def main() -> None:
     args = build_arg_parser().parse_args()
     hand_side = args.hand_side or args.controller
+    hand_mode = normalize_hand_mode(args.hand_mode)
+    if not 0.0 <= args.thumb_opposition <= 1.0:
+        raise ValueError("--thumb-opposition 必须在 [0,1]")
 
     # 1) 先把 PICO 那头拉起来。SDK 未装时 XrClient 会降级成 dummy（全零），
     #    那种情况下不会崩，但手也不会动 —— 正好一眼就看出是上游没通。
@@ -112,14 +127,16 @@ async def main() -> None:
     try:
         await hand.connect()
         logger.info(
-            "开始 PICO(%s) -> %s 实机遥操 @ %dHz。按 Ctrl+C 退出。",
+            "开始 PICO(%s) -> %s 实机遥操 @ %dHz；hand_mode=%s。按 Ctrl+C 退出。",
             args.controller,
             hand.label,
             CTRL_HZ,
+            hand_mode,
         )
         logger.info(
-            "验收：trigger=食+中+无名+小 四指屈曲 / grip=拇指屈伸(ThumbFlex) / 拇指内外收(ThumbAux) 固定 %.0f%%",
-            THUMB_OPPOSITION_DEFAULT * 100,
+            "采集接口：side=%s raw_trigger/raw_grip -> grasp_scalar + hand_cmd_6d；ThumbAux 固定 %.0f%%",
+            hand_side,
+            args.thumb_opposition * 100,
         )
 
         tick = 0
@@ -128,21 +145,27 @@ async def main() -> None:
             snap = xr.snapshot()
             trigger, grip = _pick_hand_inputs(snap, args.controller)
 
-            targets = compute_revo2_targets(
+            hand_sample = build_hand_control_sample(
+                side=hand_side,
                 trigger=trigger,
                 grip=grip,
-                thumb_opposition=THUMB_OPPOSITION_DEFAULT,
+                thumb_opposition=args.thumb_opposition,
+                mode=hand_mode,
             )
-            positions = await hand.set_normalized_targets(targets)
+            positions = await hand.set_normalized_targets(hand_sample.targets)
 
             if tick % LOG_EVERY_N_TICKS == 0:
                 logger.info(
-                    "%s trig=%.2f grip=%.2f -> %s sdk=%s",
+                    "%s side=%s mode=%s trig=%.2f grip=%.2f grasp=%.2f -> %s sdk=%s record=%s",
                     args.controller,
-                    trigger,
-                    grip,
+                    hand_sample.side,
+                    hand_sample.mode,
+                    hand_sample.raw_trigger,
+                    hand_sample.raw_grip,
+                    hand_sample.grasp_scalar,
                     hand.label,
                     positions,
+                    hand_sample.as_record(),
                 )
 
             tick += 1

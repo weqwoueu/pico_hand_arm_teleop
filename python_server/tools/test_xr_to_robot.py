@@ -5,8 +5,8 @@
 默认映射：
 
 - 左手柄 pose -> A 臂 TCP 目标，X 或左菜单切换机械臂离合；
-- 左手柄 trigger -> Revo2 食/中/无名/小 四指同步屈曲；
-- 左手柄 grip -> Revo2 拇指屈伸；
+- 默认 hand-mode=gripper：左手柄 trigger -> Revo2 五指同步抓握；
+- hand-mode=two-channel：左手柄 trigger -> 四指，grip -> 拇指屈伸；
 - Revo2 拇指对掌/内外收保持 ``THUMB_OPPOSITION_DEFAULT``。
 
 用法（在 ``python_server`` 目录）::
@@ -15,7 +15,8 @@
     export MARVIN_IP=192.168.71.190
     ./run.sh -m tools.test_xr_to_robot --ik-mode nsp clutch \
         --hand-port /dev/ttyUSB0 --hand-baudrate 460800 --hand-slave-id 0x7e \
-        --track-rotation --hz 50 --vel 50 --acc 50 --workspace-margin-m 0.05
+        --hand-mode gripper \
+        --track-rotation --hz 50 --vel 70 --acc 70 
 
 Ctrl+C：下使能 A 臂、关闭 Revo2 串口、释放 XR SDK。
 """
@@ -55,7 +56,12 @@ from core.arm_core import (  # noqa: E402
     normalize_ik_mode,
 )
 from core.hand_core import Revo2HandConfig, Revo2HandDriver  # noqa: E402
-from core.mapping_utils import THUMB_OPPOSITION_DEFAULT, compute_revo2_targets  # noqa: E402
+from core.mapping_utils import (  # noqa: E402
+    HAND_MODES,
+    THUMB_OPPOSITION_DEFAULT,
+    build_hand_control_sample,
+    normalize_hand_mode,
+)
 from core.pico_streamer import T_to_pos_rpy  # noqa: E402
 from core.xr_client import ControllerSnapshot, XrClient  # noqa: E402
 
@@ -96,7 +102,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dummy-arm", action="store_true", help="不连接控制柜，只跑 A 臂运动学 + 真 Revo2")
     ap.add_argument(
         "--ip",
-        default=os.environ.get("MARVIN_IP", "192.168.1.190"),
+        default=os.environ.get("MARVIN_IP", "192.168.71.190"),
         help="控制柜 IP，也可用 MARVIN_IP",
     )
     ap.add_argument(
@@ -141,7 +147,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--arm-control-mode",
         choices=("cart-impedance", "joint-impedance", "position"),
-        default="cart-impedance",
+        default="joint-impedance",
         help="A 臂底层控制柜模式；上层仍是 PICO->TCP target->IK->关节命令链路",
     )
     ap.add_argument(
@@ -164,8 +170,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--hand-port", default=None, help="Revo2 飞线 USB-RS485 串口，例如 /dev/ttyUSB0；默认自动探测")
     ap.add_argument("--hand-baudrate", type=int, default=None, help="Revo2 波特率；指定串口时默认 460800")
-    ap.add_argument("--hand-slave-id", type=_parse_int_auto, default=None, help="Revo2 从站号；指定串口时默认 0x7e")
+    ap.add_argument("--hand-slave-id", type=_parse_int_auto, default=None, help="Revo2 从站号；指定串口时默认 left=0x7e, right=0x7f")
     ap.add_argument("--hand-speed", type=int, default=1000, help="Revo2 下发速度 0~1000，默认 1000")
+    ap.add_argument(
+        "--hand-mode",
+        choices=HAND_MODES,
+        default="gripper",
+        help="手部控制模式：gripper=trigger 一维夹爪；two-channel=trigger 四指 + grip 拇指",
+    )
     ap.add_argument(
         "--hand-release-on-close",
         action="store_true",
@@ -175,7 +187,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--thumb-opposition",
         type=float,
         default=THUMB_OPPOSITION_DEFAULT,
-        help="拇指对掌/内外收固定值，[0,1]",
+        help="拇指对掌/内外收归一化固定值，[0,1]；1.0 对应当前 ThumbAux 标定上限",
     )
     ap.add_argument(
         "--track-rotation",
@@ -224,6 +236,7 @@ async def main_async() -> None:
         raise ValueError("--hz 必须 > 0")
     if not 0.0 <= args.thumb_opposition <= 1.0:
         raise ValueError("--thumb-opposition 必须在 [0,1]")
+    hand_mode = normalize_hand_mode(args.hand_mode)
 
     try:
         ik_mode, ik_nsp_strategy = normalize_ik_mode(args.ik_mode)
@@ -304,11 +317,13 @@ async def main_async() -> None:
         )
         logger.info(
             "开始 PICO -> A 臂 + %s @ %.1fHz；arm_controller=%s hand_controller=%s "
-            "rotation=%s control=%s ik=%s。%s 切 A 臂离合，Ctrl+C 退出。",
+            "hand_side=%s hand_mode=%s rotation=%s control=%s ik=%s。%s 切 A 臂离合，Ctrl+C 退出。",
             hand.label,
             args.hz,
             args.arm_controller,
             args.hand_controller,
+            args.hand_side,
+            hand_mode,
             "follow" if args.track_rotation else "hold",
             args.arm_control_mode,
             arm.ik_mode_label,
@@ -335,12 +350,14 @@ async def main_async() -> None:
             else:
                 hand_trigger, hand_grip = _pick_hand_inputs(snap, args.hand_controller)
 
-            hand_targets = compute_revo2_targets(
+            hand_sample = build_hand_control_sample(
+                side=args.hand_side,
                 trigger=hand_trigger,
                 grip=hand_grip,
                 thumb_opposition=args.thumb_opposition,
+                mode=hand_mode,
             )
-            hand_positions = await hand.set_normalized_targets(hand_targets)
+            hand_positions = await hand.set_normalized_targets(hand_sample.targets)
             hand_ok_cnt += 1
 
             if cmd.active and not prev_active:
@@ -363,13 +380,16 @@ async def main_async() -> None:
             if tick % max(1, int(args.hz)) == 0:
                 xyz, rpy = T_to_pos_rpy(last_cmd_T)
                 logger.info(
-                    "tick=%d arm_active=%s hand_trig=%.2f hand_grip=%.2f "
+                    "tick=%d arm_active=%s hand_side=%s hand_mode=%s hand_trig=%.2f hand_grip=%.2f grasp=%.2f "
                     "xyz_m=[%+.3f %+.3f %+.3f] rpy_deg=[%+.1f %+.1f %+.1f] "
                     "hand_sdk=%s arm_ok=%d hand_ok=%d",
                     tick,
                     cmd.active,
-                    hand_trigger,
-                    hand_grip,
+                    hand_sample.side,
+                    hand_sample.mode,
+                    hand_sample.raw_trigger,
+                    hand_sample.raw_grip,
+                    hand_sample.grasp_scalar,
                     xyz[0],
                     xyz[1],
                     xyz[2],

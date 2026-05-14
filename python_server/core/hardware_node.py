@@ -255,7 +255,10 @@ class Revo2HandDriver:
                 )
             else:
                 port_name = self._config.port
-                baudrate = self._config.baudrate or DEFAULT_REVO2_BAUDRATE
+                baudrate = self._coerce_baudrate(
+                    libstark,
+                    self._config.baudrate or DEFAULT_REVO2_BAUDRATE,
+                )
                 slave_id = self._config.slave_id or DEFAULT_REVO2_SLAVE_ID
 
             logger.info(
@@ -303,6 +306,31 @@ class Revo2HandDriver:
                 libstark.modbus_close(client)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Revo2 关闭连接异常: %s", exc)
+
+    @staticmethod
+    def _coerce_baudrate(libstark, baudrate):  # noqa: ANN001
+        if not isinstance(baudrate, int):
+            return baudrate
+        baudrate_cls = libstark.Baudrate
+        if hasattr(baudrate_cls, "from_int"):
+            try:
+                return baudrate_cls.from_int(baudrate)
+            except Exception:  # noqa: BLE001
+                pass
+        baudrate_map = {
+            19200: baudrate_cls.Baud19200,
+            57600: baudrate_cls.Baud57600,
+            115200: baudrate_cls.Baud115200,
+            460800: baudrate_cls.Baud460800,
+            1000000: baudrate_cls.Baud1Mbps,
+            2000000: baudrate_cls.Baud2Mbps,
+            5000000: baudrate_cls.Baud5Mbps,
+        }
+        try:
+            return baudrate_map[baudrate]
+        except KeyError as exc:
+            supported = ", ".join(str(k) for k in sorted(baudrate_map))
+            raise ValueError(f"不支持的 Revo2 baudrate={baudrate}，支持: {supported}") from exc
 
 
 # ---------- 组合节点 ----------

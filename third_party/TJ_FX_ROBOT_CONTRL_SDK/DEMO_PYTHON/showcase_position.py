@@ -90,12 +90,12 @@ logger.info(f'set vel={sub_data["inputs"][0]["joint_vel_ratio"]}, acc={sub_data[
 
 
 '''点位1'''
-robot.clear_set()
-joint_cmd_1=[0.,0.,60.,60.,0.,0.,0.]
-robot.set_joint_cmd_pose(arm='A',joints=joint_cmd_1)
+#robot.clear_set()
+#joint_cmd_1=[0.,0.,60.,60.,0.,0.,0.]
+#robot.set_joint_cmd_pose(arm='A',joints=joint_cmd_1)
 #obot.set_joint_cmd_pose(arm='B',joints=joint_cmd_1)
-robot.send_cmd()
-time.sleep(3) #预留运动时间
+#robot.send_cmd()
+#time.sleep(3) #预留运动时间
 
 
 '''订阅数据查看是否到位'''
